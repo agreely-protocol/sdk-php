@@ -5,8 +5,9 @@ One call to gate data use on a live, authoritative consent check. No database, n
 ref tables, no local mirror - every `check()` is a fresh call to Agreely (caching
 an allow while a revoke lands is a correctness failure, spec §16).
 
-This is the PHP port of [`@agreely/sdk`](../ts) (the TypeScript reference). Both
-SDKs assert the **same shared golden vectors** (`../vectors/vectors.json`)
+This is the PHP port of [`@agreely/sdk`](https://www.npmjs.com/package/@agreely/sdk),
+the TypeScript reference client (source: https://github.com/agreely-protocol/sdk).
+Both SDKs assert the **same shared golden vectors** (`vectors/vectors.json`)
 against the live API, so neither drifts from the contract.
 
 - **One-call DX.** `if ($agreely->check($id, $category, $purpose)) { ... }`
@@ -256,6 +257,13 @@ MIT-licensed and built to be provable, not just trusted:
 Agreely records and structures consent; it does not certify that your
 organization is compliant.
 
+## The TypeScript SDK
+
+Prefer Node? The same client, same contract, same golden vectors:
+
+- `@agreely/sdk` on npm: https://www.npmjs.com/package/@agreely/sdk
+- Source: https://github.com/agreely-protocol/sdk
+
 ## Links
 
 - Product and API: https://agreely.ca
@@ -269,10 +277,11 @@ composer test          # fast offline unit suite (mock transport)
 composer stan          # phpstan level max
 vendor/bin/phpcs       # PSR-12
 
-# Live contract + golden-vector parity (needs `docker compose up api` on :8081):
-make php-sdk-contract  # from the repo root - seeds a fixture, runs the contract suite
+composer test:contract # live contract + golden-vector parity
 ```
 
-The contract suite asserts the PHP SDK against the live API **and** the shared
-golden vectors (`../vectors/vectors.json`) - the cross-SDK anti-drift gate
-(PHP == TS == the contract).
+The unit suite is fully offline (mock transport) and always runs. The contract
+suite (`composer test:contract`) asserts the PHP SDK against a live `/v1` API
+**and** the shared golden vectors (`vectors/vectors.json`) - the cross-SDK
+anti-drift gate (PHP == TS == the contract). Without a seeded fixture from a
+running Agreely stack it skips cleanly.

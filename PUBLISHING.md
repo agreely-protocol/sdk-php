@@ -27,9 +27,12 @@ There is no build step. Packagist reads a git tag.
 composer test          # unit suite must be green
 ```
 
-1. Push this repo to its public GitHub URL.
-2. Submit the repo URL at https://packagist.org/packages/submit (one time),
-   or rely on the GitHub webhook for later updates.
+1. Push this repo to its public GitHub URL
+   (https://github.com/agreely-protocol/sdk-php).
+2. Submit `https://github.com/agreely-protocol/sdk-php` at
+   https://packagist.org/packages/submit (one time), or rely on the GitHub
+   webhook for later updates. The published Composer package name stays
+   `agreely/sdk`; only the source repo moved.
 3. **Packagist reads a `v0.1.0` git tag** as the released version. The human
    creates and pushes that tag at publish time.
 
