@@ -85,7 +85,7 @@ final class LiveContractTest extends TestCase
         $this->assertTrue($agreely->check($this->fixture->subject(), $r['category'], $r['purpose']));
 
         // Flip the enforcement record out-of-band (the M5 revoke path), in-container.
-        $repoRoot = dirname(__DIR__, 3);
+        $repoRoot = dirname(__DIR__, 2);
         exec(
             'cd ' . escapeshellarg($repoRoot)
             . ' && docker compose exec -T api php scripts/sdk-contract-seed.php revoke '

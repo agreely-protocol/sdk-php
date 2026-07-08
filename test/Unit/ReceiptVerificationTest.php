@@ -26,7 +26,7 @@ final class ReceiptVerificationTest extends TestCase
     private static function rv(): array
     {
         /** @var array<string,mixed> $data */
-        $data = json_decode((string) file_get_contents(dirname(__DIR__, 3) . '/vectors/vectors.json'), true);
+        $data = json_decode((string) file_get_contents(dirname(__DIR__, 2) . '/vectors/vectors.json'), true);
         /** @var array{fixtures: array<string,mixed>, cases: list<array<string,mixed>>} $rv */
         $rv = $data['receiptVerification'];
         return $rv;

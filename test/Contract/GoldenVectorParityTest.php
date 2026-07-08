@@ -26,7 +26,7 @@ final class GoldenVectorParityTest extends TestCase
 
     private static function golden(): string
     {
-        return dirname(__DIR__, 3) . '/vectors/vectors.json';
+        return dirname(__DIR__, 2) . '/vectors/vectors.json';
     }
 
     protected function setUp(): void

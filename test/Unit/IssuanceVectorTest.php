@@ -21,7 +21,7 @@ final class IssuanceVectorTest extends TestCase
     /** @return array<string,mixed> */
     private static function golden(): array
     {
-        $data = json_decode((string) file_get_contents(dirname(__DIR__, 3) . '/vectors/vectors.json'), true);
+        $data = json_decode((string) file_get_contents(dirname(__DIR__, 2) . '/vectors/vectors.json'), true);
         self::assertIsArray($data);
         self::assertArrayHasKey('issuanceRequest', $data, 'vectors.json must carry the issuanceRequest section.');
         return $data['issuanceRequest'];
