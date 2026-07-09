@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Agreely\Sdk\Http;
 
 use Agreely\Sdk\Errors\AgreelyAuthError;
+use Agreely\Sdk\Errors\AgreelyBillingInactiveError;
 use Agreely\Sdk\Errors\AgreelyError;
 use Agreely\Sdk\Errors\AgreelyNotFoundError;
 use Agreely\Sdk\Errors\AgreelyRateLimitError;
@@ -171,6 +172,10 @@ final class Transport
                 $header = $res->header('Retry-After');
                 $retryAfter = ($header !== null && is_numeric($header)) ? (int) $header : null;
                 throw new AgreelyRateLimitError($message, 'rate_limited', $res->status, $retryAfter);
+            case 402:
+                // The company's Agreely subscription is inactive/lapsed. Fail-closed for
+                // gating, but distinct from an outage: not transient, not retryable.
+                throw new AgreelyBillingInactiveError($message, $code ?? 'billing_inactive', 402);
             default:
                 // 503 and any other 5xx: unreachable. 503 is retryable for idempotent calls.
                 throw new AgreelyUnavailableError($message, $res->status, $res->status === 503);

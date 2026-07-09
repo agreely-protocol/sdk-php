@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Agreely\Sdk;
 
 use Agreely\Sdk\Degrade\DegradePolicy;
+use Agreely\Sdk\Errors\AgreelyBillingInactiveError;
 use Agreely\Sdk\Errors\AgreelyConfigError;
 use Agreely\Sdk\Errors\AgreelyUnavailableError;
 use Agreely\Sdk\Http\CurlHttpClient;
@@ -203,8 +204,11 @@ final class Agreely
     {
         try {
             return $this->resolve($customerId, $category, $purpose, $opts)->isAllow();
-        } catch (AgreelyUnavailableError) {
-            return false; // fail-closed deny
+        } catch (AgreelyUnavailableError | AgreelyBillingInactiveError) {
+            // Fail-closed deny. An outage OR a lapsed company subscription (402)
+            // must never resolve to an allow. checkDetailed() still THROWS the
+            // typed error so a caller can surface "billing lapsed" distinctly.
+            return false;
         }
         // Auth / validation / rate-limit / not-found surface as thrown errors.
     }

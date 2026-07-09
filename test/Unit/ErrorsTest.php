@@ -6,6 +6,7 @@ namespace Agreely\Sdk\Test\Unit;
 
 use Agreely\Sdk\Agreely;
 use Agreely\Sdk\Errors\AgreelyAuthError;
+use Agreely\Sdk\Errors\AgreelyBillingInactiveError;
 use Agreely\Sdk\Errors\AgreelyNotFoundError;
 use Agreely\Sdk\Errors\AgreelyRateLimitError;
 use Agreely\Sdk\Errors\AgreelyUnavailableError;
@@ -67,6 +68,34 @@ final class ErrorsTest extends TestCase
     {
         $this->expectException(AgreelyNotFoundError::class);
         $this->client($this->err(404, 'not_found'))->consentRequests()->get('0xabc');
+    }
+
+    public function test402IsBillingInactiveError(): void
+    {
+        try {
+            $this->client($this->err(402, 'billing_inactive'))->checkDetailed('c', 'a', 'b');
+            $this->fail('expected AgreelyBillingInactiveError');
+        } catch (AgreelyBillingInactiveError $e) {
+            $this->assertSame('billing_inactive', $e->code);
+            $this->assertSame(402, $e->status);
+        }
+    }
+
+    public function test402FailsClosedFromCheck(): void
+    {
+        // A lapsed company subscription must deny (fail-closed), never accidentally allow.
+        $this->assertFalse(
+            $this->client($this->err(402, 'billing_inactive'))->check('c', 'a', 'b'),
+        );
+    }
+
+    public function test402IsNotSwallowedAsAllow(): void
+    {
+        // Even against a would-be allow payload, a 402 fail-closes to false.
+        $http = new MockHttpClient([
+            MockHttpClient::json(402, ['error' => ['code' => 'billing_inactive', 'message' => 'subscription lapsed']]),
+        ]);
+        $this->assertFalse($this->client($http)->check('c', 'a', 'b'));
     }
 
     public function test429IsRateLimitErrorWithRetryAfter(): void
