@@ -20,6 +20,10 @@ final class ConsentRequestRecord
         public readonly string $expiresAt,
         public readonly string $createdAt,
         public readonly ?string $settledAt,
+        /** The company's OWN subject reference the request was issued for. */
+        public readonly string $customerId,
+        /** The code of the consent document the request was issued under (metadata). */
+        public readonly string $documentCode,
         public readonly array $items,
         /** Null only on legacy records issued before the document became mandatory. */
         public readonly ?ConsentDocumentDescriptor $document = null,
@@ -36,6 +40,8 @@ final class ConsentRequestRecord
             Wire::str($wire['expiresAt'] ?? null),
             Wire::str($wire['createdAt'] ?? null),
             Wire::nullableStr($wire['settledAt'] ?? null),
+            Wire::str($wire['customerId'] ?? null),
+            Wire::str($wire['documentCode'] ?? null),
             ItemLabels::listFromWire(Wire::objects($wire, 'items')),
             ConsentDocumentDescriptor::fromWireNullable($wire['document'] ?? null),
         );

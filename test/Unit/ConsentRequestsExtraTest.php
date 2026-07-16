@@ -20,8 +20,11 @@ final class ConsentRequestsExtraTest extends TestCase
         return new Agreely(['apiKey' => 'agr_live_test', 'timeout' => 5000, 'httpClient' => $http, ...$extra]);
     }
 
-    /** @return array<string,mixed> */
-    private function rec(string $id, string $status = 'pending'): array
+    /**
+     * @param array<string,mixed> $extra
+     * @return array<string,mixed>
+     */
+    private function rec(string $id, string $status = 'pending', array $extra = []): array
     {
         return [
             'requestId' => $id,
@@ -30,8 +33,11 @@ final class ConsentRequestsExtraTest extends TestCase
             'expiresAt' => '2031-01-01T00:00:00Z',
             'createdAt' => '2026-01-01T00:00:00Z',
             'settledAt' => null,
+            'customerId' => 'cust_1',
+            'documentCode' => 'conditions-marketing',
             'items' => [],
             'document' => null,
+            ...$extra,
         ];
     }
 

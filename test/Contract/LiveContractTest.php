@@ -147,6 +147,27 @@ final class LiveContractTest extends TestCase
         $page = $issuer->consentRequests()->list(['status' => 'pending']);
         $found = array_filter($page->items, static fn ($r): bool => $r->requestId === $first->requestId);
         $this->assertNotEmpty($found);
+
+        // The customerId + limit filters narrow the page; the record carries the
+        // new customerId + documentCode metadata.
+        $filtered = $issuer->consentRequests()->list([
+            'customerId' => $this->fixture->subject(),
+            'status' => 'pending',
+            'limit' => 100,
+        ]);
+        $mine = array_values(array_filter(
+            $filtered->items,
+            static fn ($r): bool => $r->requestId === $first->requestId,
+        ));
+        $this->assertNotEmpty($mine);
+        $this->assertSame($this->fixture->subject(), $mine[0]->customerId);
+        $this->assertSame($issue['documentCode'], $mine[0]->documentCode);
+
+        // hasPending is the dedup helper: a pending request exists for this customer.
+        $this->assertTrue($issuer->consentRequests()->hasPending($this->fixture->subject()));
+        $this->assertTrue(
+            $issuer->consentRequests()->hasPending($this->fixture->subject(), $issue['documentCode']),
+        );
     }
 
     public function testDocumentCodeResolvedToThePublishedVersionServerSide(): void

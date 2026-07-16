@@ -6,6 +6,7 @@ namespace Agreely\Sdk\Test\Unit;
 
 use Agreely\Sdk\Agreely;
 use Agreely\Sdk\Errors\AgreelyAuthError;
+use Agreely\Sdk\Errors\AgreelyConfigError;
 use Agreely\Sdk\Errors\AgreelyNotFoundError;
 use Agreely\Sdk\Test\Support\MockHttpClient;
 use Agreely\Sdk\Types\CancelledRequest;
@@ -151,20 +152,111 @@ final class ResourcesTest extends TestCase
                         'expiresAt' => '2026-07-01',
                         'createdAt' => '2026-06-01',
                         'settledAt' => null,
+                        'customerId' => 'cust_9',
+                        'documentCode' => 'infolettre',
                         'items' => [],
                     ],
                 ],
                 'nextCursor' => '0x' . str_repeat('d', 64),
             ]),
         ]);
-        $page = $this->client($http)->consentRequests()->list(['status' => 'pending', 'cursor' => '0xprev']);
+        $page = $this->client($http)->consentRequests()->list([
+            'customerId' => 'cust_9',
+            'status' => 'pending',
+            'limit' => 25,
+            'cursor' => '0xprev',
+        ]);
         $this->assertInstanceOf(ConsentRequestPage::class, $page);
         $this->assertCount(1, $page->items);
         $this->assertSame('0x' . str_repeat('d', 64), $page->nextCursor);
         $this->assertNull($page->items[0]->settledAt);
-        // Query params travel on the wire.
-        $this->assertStringContainsString('status=pending', $http->calls[0]->query());
-        $this->assertStringContainsString('cursor=', $http->calls[0]->query());
+        // The new metadata fields are surfaced on the record.
+        $this->assertSame('cust_9', $page->items[0]->customerId);
+        $this->assertSame('infolettre', $page->items[0]->documentCode);
+        // All filters travel on the wire.
+        $query = $http->calls[0]->query();
+        $this->assertStringContainsString('customerId=cust_9', $query);
+        $this->assertStringContainsString('status=pending', $query);
+        $this->assertStringContainsString('limit=25', $query);
+        $this->assertStringContainsString('cursor=', $query);
+    }
+
+    public function testHasPendingReturnsTrueWhenAPendingRequestExists(): void
+    {
+        $http = new MockHttpClient([
+            MockHttpClient::json(200, [
+                'requests' => [$this->pendingRec('0xa', 'cust_1', 'conditions-marketing')],
+                'nextCursor' => null,
+            ]),
+        ]);
+        $has = $this->client($http)->consentRequests()->hasPending('cust_1');
+        $this->assertTrue($has);
+        // It queries status:pending scoped to the customer.
+        $query = $http->calls[0]->query();
+        $this->assertStringContainsString('customerId=cust_1', $query);
+        $this->assertStringContainsString('status=pending', $query);
+    }
+
+    public function testHasPendingReturnsFalseWhenNoPendingRequestExists(): void
+    {
+        $http = new MockHttpClient([
+            MockHttpClient::json(200, ['requests' => [], 'nextCursor' => null]),
+        ]);
+        $this->assertFalse($this->client($http)->consentRequests()->hasPending('cust_1'));
+    }
+
+    public function testHasPendingNarrowsToADocumentCode(): void
+    {
+        $http = new MockHttpClient([
+            MockHttpClient::json(200, [
+                'requests' => [
+                    $this->pendingRec('0xa', 'cust_1', 'conditions-marketing'),
+                    $this->pendingRec('0xb', 'cust_1', 'infolettre'),
+                ],
+                'nextCursor' => null,
+            ]),
+        ]);
+        $this->assertTrue($this->client($http)->consentRequests()->hasPending('cust_1', 'infolettre'));
+    }
+
+    public function testHasPendingIsFalseForADifferentDocumentCode(): void
+    {
+        $http = new MockHttpClient([
+            MockHttpClient::json(200, [
+                'requests' => [$this->pendingRec('0xa', 'cust_1', 'conditions-marketing')],
+                'nextCursor' => null,
+            ]),
+        ]);
+        $this->assertFalse($this->client($http)->consentRequests()->hasPending('cust_1', 'infolettre'));
+    }
+
+    public function testHasPendingThrowsOnBlankCustomerIdBeforeAnyWireCall(): void
+    {
+        $http = new MockHttpClient([
+            MockHttpClient::json(200, ['requests' => [], 'nextCursor' => null]),
+        ]);
+        $this->expectException(AgreelyConfigError::class);
+        try {
+            $this->client($http)->consentRequests()->hasPending('   ');
+        } finally {
+            $this->assertCount(0, $http->calls);
+        }
+    }
+
+    /** @return array<string,mixed> */
+    private function pendingRec(string $id, string $customerId, string $documentCode): array
+    {
+        return [
+            'requestId' => $id,
+            'status' => 'pending',
+            'validUntil' => '2031-01-01',
+            'expiresAt' => '2026-07-01',
+            'createdAt' => '2026-06-01',
+            'settledAt' => null,
+            'customerId' => $customerId,
+            'documentCode' => $documentCode,
+            'items' => [],
+        ];
     }
 
     public function testGetUsesTheProtocolRequestIdInThePath(): void

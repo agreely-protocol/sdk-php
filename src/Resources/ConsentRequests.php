@@ -88,23 +88,55 @@ final class ConsentRequests
     }
 
     /**
-     * List the company's requests, newest first, with optional status filter +
-     * cursor. The page maps the wire `requests` field to `items`.
+     * List the company's requests, newest first (keyset). All filters optional:
+     * 'customerId' (the company's own subject ref), 'status', 'limit' (page size;
+     * server default 50, max 100), and 'cursor' (a requestId from a prior
+     * nextCursor). Returns metadata only, tenant-scoped by the API key. The page
+     * maps the wire `requests` field to `items`.
      *
-     * @param array{status?:string,cursor?:string} $input
+     * @param array{customerId?:string,status?:string,limit?:int,cursor?:string} $input
      */
     public function list(array $input = []): ConsentRequestPage
     {
+        $limit = isset($input['limit']) && is_int($input['limit']) ? (string) $input['limit'] : null;
         $wire = $this->transport->request(new RequestSpec(
             method: 'GET',
             path: '/v1/consent-requests',
             query: [
+                'customerId' => $input['customerId'] ?? null,
                 'status' => $input['status'] ?? null,
+                'limit' => $limit,
                 'cursor' => $input['cursor'] ?? null,
             ],
             idempotentRetry: true,
         ));
         return ConsentRequestPage::fromWire($wire);
+    }
+
+    /**
+     * The dedup helper: does an OPEN (still-pending) consent request already exist
+     * for this customer? Lists status:'pending' for the customer (auto-paginating)
+     * and returns true as soon as one is found, optionally narrowed to a specific
+     * documentCode. Use it before create() to avoid re-issuing (a second email)
+     * when a request is already outstanding.
+     *
+     * Honest scope: this is a metadata convenience over the list endpoint, NOT a
+     * compliance decision. It reports whether a pending request exists; it does not
+     * assert consent was given.
+     */
+    public function hasPending(string $customerId, ?string $documentCode = null): bool
+    {
+        $ref = trim($customerId);
+        if ($ref === '') {
+            throw new AgreelyConfigError('consentRequests.hasPending requires a customerId.');
+        }
+        $wanted = $documentCode !== null ? trim($documentCode) : '';
+        foreach ($this->iterate(['customerId' => $ref, 'status' => 'pending']) as $req) {
+            if ($wanted === '' || $req->documentCode === $wanted) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /** Fetch one request by its protocol requestId (0x + 64hex). */
@@ -146,7 +178,7 @@ final class ConsentRequests
      *
      *   foreach ($agreely->consentRequests()->iterate() as $req) { … }
      *
-     * @param array{status?:string,cursor?:string,maxPages?:int} $input
+     * @param array{customerId?:string,status?:string,limit?:int,cursor?:string,maxPages?:int} $input
      * @return Generator<int, ConsentRequestRecord>
      */
     public function iterate(array $input = []): Generator
@@ -157,8 +189,14 @@ final class ConsentRequests
         $cursor = $input['cursor'] ?? null;
         for ($page = 0; $page < $maxPages; $page++) {
             $listInput = [];
+            if (isset($input['customerId'])) {
+                $listInput['customerId'] = $input['customerId'];
+            }
             if (isset($input['status'])) {
                 $listInput['status'] = $input['status'];
+            }
+            if (isset($input['limit'])) {
+                $listInput['limit'] = $input['limit'];
             }
             if ($cursor !== null) {
                 $listInput['cursor'] = $cursor;
@@ -177,7 +215,7 @@ final class ConsentRequests
     /**
      * Collect {@see iterate} into a single array (convenience).
      *
-     * @param array{status?:string,cursor?:string,maxPages?:int} $input
+     * @param array{customerId?:string,status?:string,limit?:int,cursor?:string,maxPages?:int} $input
      * @return list<ConsentRequestRecord>
      */
     public function collect(array $input = []): array
