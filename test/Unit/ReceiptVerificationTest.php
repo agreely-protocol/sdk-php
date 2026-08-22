@@ -260,6 +260,67 @@ final class ReceiptVerificationTest extends TestCase
         return $out;
     }
 
+    /**
+     * THE DEFAULT DID HOSTS, read back off the URLs the verifier actually FETCHES.
+     *
+     * Both defaults were wrong in v0.2.0 and both were silent:
+     *
+     *   - the company did:web host defaulted to the apex `agreely.ca`, which is the
+     *     MARKETING SITE and 404s on /c/{slug}/did.json. The document is served by the
+     *     Agreely WEB tier (app.agreely.ca); the route is MODE=WEB only.
+     *   - the citizen resolver base defaulted to `api.agreely.ca`, which does not route
+     *     GET /did/{did} at all (that is MODE=CITIZEN, my.agreely.ca). Every citizen
+     *     receipt verified with the default resolver therefore reported
+     *     citizenAssertion "unavailable" and overall "unavailable": never a false
+     *     "verified", but never a real verification either.
+     *
+     * These assert the composed URL, not a second copy of the constant, so they cannot
+     * pass tautologically. If one fails, confirm the tier that actually serves the route
+     * before touching it: probe `https://<host>/c/<slug>/did.json` (expect 200) and
+     * `https://<host>/did/notadid` (expect 400 "invalid did", which proves the route
+     * exists) rather than assuming.
+     */
+    public function testCompanyDidResolvesAgainstTheWebTierByDefault(): void
+    {
+        $fetched = [];
+        (new ReceiptVerifier([
+            'httpGet' => static function (string $url) use (&$fetched): ?string {
+                $fetched[] = $url;
+
+                return null;
+            },
+        ]))->resolveCompanyDid('acme');
+
+        $this->assertSame(['https://app.agreely.ca/c/acme/did.json'], $fetched);
+    }
+
+    public function testCitizenDidResolvesAgainstTheCitizenTierByDefault(): void
+    {
+        $citizenDid = 'did:agreely:citizen:BXZMTST2EGHYNQ62Q8AJWH8Q08';
+        $fetched = [];
+        Agreely::verifyReceipt(self::citizenReceipt(), [
+            'verifyDisclosure' => false,
+            'httpGet' => static function (string $url) use (&$fetched): ?string {
+                $fetched[] = $url;
+
+                return null;
+            },
+        ]);
+
+        $this->assertContains(
+            'https://my.agreely.ca/did/' . rawurlencode($citizenDid),
+            $fetched,
+            'The default citizen resolver must call the CITIZEN tier, which is the only tier that routes /did/{did}.',
+        );
+        foreach ($fetched as $url) {
+            $this->assertStringNotContainsString(
+                'api.agreely.ca',
+                $url,
+                'api.agreely.ca does not route /did/{did}; resolving there always 404s.',
+            );
+        }
+    }
+
     public function testCorruptedCitizenKeyFailsCleanlyWithNoOpensslWarning(): void
     {
         // Corrupt the resolved passkey to an off-curve P-256 point (y = all zeros).
@@ -301,40 +362,49 @@ final class ReceiptVerificationTest extends TestCase
     }
 
     /**
-     * A company DID is did:web:agreely.ca:c:{slug}, served at the APEX host
-     * https://agreely.ca/c/{slug}/did.json (never api.agreely.ca).
+     * The DID STRING resolveCompanyDid builds, which is what ends up inside a receipt.
+     *
+     * This pair previously pinned the APEX `agreely.ca`, which is the marketing site and
+     * 404s on /c/{slug}/did.json: the assertions encoded the bug rather than catching it.
+     * The composed URL is asserted in testCompanyDidResolvesAgainstTheWebTierByDefault;
+     * this pins the identity that URL belongs to.
      */
-    public function testResolveCompanyDidTargetsTheApexDidJsonUrl(): void
+    public function testResolveCompanyDidBuildsTheWebTierDidString(): void
     {
-        $expected = 'https://agreely.ca/c/acme/did.json';
-        $requested = null;
+        $seen = null;
         $verifier = new ReceiptVerifier([
-            'httpGet' => static function (string $url) use (&$requested): ?string {
-                $requested = $url;
-                return json_encode(['id' => 'did:web:agreely.ca:c:acme']) ?: null;
+            'resolver' => static function (string $did) use (&$seen): ?array {
+                $seen = $did;
+
+                return null;
             },
         ]);
         $verifier->resolveCompanyDid('acme');
-        $this->assertSame($expected, $requested);
-        $this->assertStringNotContainsString('api.agreely.ca', (string) $requested);
+
+        $this->assertSame('did:web:app.agreely.ca:c:acme', $seen);
+        // Neither the apex (marketing, 404s) nor the api tier (does not serve did.json).
+        $this->assertNotSame('did:web:agreely.ca:c:acme', $seen);
+        $this->assertStringNotContainsString('api.agreely.ca', (string) $seen);
     }
 
     /**
-     * Resolving the DID string did:web:agreely.ca:c:acme directly maps to the
-     * same apex URL as the resolveCompanyDid('acme') slug input.
+     * companyDidHost still overrides the default, which is how a self-hosted or
+     * white-labelled deployment points the resolver at its own domain.
      */
-    public function testDefaultResolverMapsCompanyDidStringToTheSameUrl(): void
+    public function testCompanyDidHostOptionOverridesTheDefault(): void
     {
         $requested = null;
         $verifier = new ReceiptVerifier([
-            'companyDidHost' => 'agreely.ca',
+            'companyDidHost' => 'consent.example.test',
             'httpGet' => static function (string $url) use (&$requested): ?string {
                 $requested = $url;
-                return json_encode(['id' => 'did:web:agreely.ca:c:acme']) ?: null;
+
+                return null;
             },
         ]);
         $verifier->resolveCompanyDid('acme');
-        $this->assertSame('https://agreely.ca/c/acme/did.json', $requested);
+
+        $this->assertSame('https://consent.example.test/c/acme/did.json', $requested);
     }
 
     public function testGenuineCompanyReceiptReportsCellLabelBindingPass(): void

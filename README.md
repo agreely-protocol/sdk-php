@@ -381,7 +381,10 @@ MIT-licensed and built to be provable, not just trusted:
   verifier additionally contacts a chain RPC you pass in (on-chain anchor) and an
   IPFS gateway (default `gateway.lighthouse.storage`, overridable) for the opt-in
   disclosure-copy check; its `did:web` resolver fetches the issuer host named in
-  the receipt over HTTPS.
+  the receipt over HTTPS. Resolving a citizen DID calls the Agreely CITIZEN tier
+  (default `https://my.agreely.ca/did/{did}`), and `resolveCompanyDid` calls the
+  Agreely WEB tier (default `https://app.agreely.ca/c/{slug}/did.json`); both are
+  overridable, and injecting your own `resolver` removes them entirely.
 - **Minimal deps, no install scripts.** `ext-curl` + `ext-json`; bring your own
   PSR-18 HTTP client if you prefer.
 - **Audit surface.** `src/Http/CurlHttpClient.php` and

@@ -38,8 +38,10 @@ use Throwable;
  *
  * Options (all network seams injectable, so tests run with NO network):
  *   - resolver:            callable(string $did): ?array  — DID document or null
- *   - companyDidHost:      string (default agreely.ca, the apex host serving /c/{slug}/did.json) for resolveCompanyDid
- *   - citizenResolverBaseUrl: string (default https://api.agreely.ca)
+ *   - companyDidHost:      string (default app.agreely.ca, the Agreely WEB tier, which is what
+ *                          serves /c/{slug}/did.json) for resolveCompanyDid
+ *   - citizenResolverBaseUrl: string (default https://my.agreely.ca, the Agreely CITIZEN tier,
+ *                          which is what serves /did/{did})
  *   - ipfsGateway:         callable(string $cid): string  — CID -> URL
  *   - httpGet:             callable(string $url): ?string — fetch body (IPFS)
  *   - httpPost:            callable(string $url, string $body): ?string — JSON-RPC
@@ -47,8 +49,24 @@ use Throwable;
  */
 final class ReceiptVerifier
 {
-    private const DEFAULT_COMPANY_HOST = 'agreely.ca';
-    private const DEFAULT_CITIZEN_BASE = 'https://api.agreely.ca';
+    /**
+     * The host that SERVES company did:web documents, i.e. the Agreely WEB (dashboard)
+     * tier: `did:web:app.agreely.ca:c:{slug}` resolves to
+     * `https://app.agreely.ca/c/{slug}/did.json`.
+     *
+     * It is NOT the apex `agreely.ca`, which is the marketing site and 404s on that
+     * path. `GET /c/{slug}/did.json` is routed on MODE=WEB only; the api and citizen
+     * tiers do not serve it.
+     */
+    private const DEFAULT_COMPANY_HOST = 'app.agreely.ca';
+
+    /**
+     * The base URL of the CITIZEN tier, which serves `GET /did/{did}` for
+     * `did:agreely:citizen:*`. It is NOT the api tier: `GET /did/{did}` is routed on
+     * MODE=CITIZEN only, and api.agreely.ca 404s on it, which made every citizen
+     * assertion resolve to "unavailable" by default.
+     */
+    private const DEFAULT_CITIZEN_BASE = 'https://my.agreely.ca';
     private const DEFAULT_IPFS_GATEWAY = 'https://gateway.lighthouse.storage/ipfs/';
     // The LIVE Base mainnet AgreelyRegistry, deployed at block 48889369 (the 2026-07-19
     // redeploy that carries the DID-tagged anchor events). EIP-55 checksummed.
