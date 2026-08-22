@@ -30,11 +30,18 @@ final class ManualConsents
      * carries the pdfSha256 commitment ("0x" + 64 hex); the pdf bytes (base64) are
      * uploaded only when explicitly provided. NEVER auto-retried (it mutates).
      *
-     * IDEMPOTENCY CAVEAT: an Idempotency-Key is auto-generated per call (override
-     * via $options['idempotencyKey']) and sent, but the server does NOT yet honor
-     * it for POST /v1/manual-consents (unlike consentRequests()->create). A
-     * retried record CAN therefore create a DUPLICATE company-attested consent;
-     * guard against duplicate submits yourself.
+     * IDEMPOTENT on retry (server-honored since 2026-07-01): an Idempotency-Key is
+     * auto-generated per call (override via $options['idempotencyKey']) and the
+     * server HONORS it for POST /v1/manual-consents, exactly like
+     * consentRequests()->create. A retry with the same key REPLAYS the original 201
+     * body (same consentId, same consentRefs) and records NOTHING new, so a dropped
+     * connection can never double-attest a consent.
+     *
+     * The KEY is the whole contract: the server keys the replay on (company, key)
+     * alone, NOT on the request body and NOT on the endpoint. Reusing a key with a
+     * different payload silently replays the FIRST payload and writes nothing, and a
+     * key already spent on consentRequests()->create will replay THAT response here.
+     * Let the SDK generate the key unless you have a durable, operation-unique id.
      *
      * @param array{
      *     customerId:string,

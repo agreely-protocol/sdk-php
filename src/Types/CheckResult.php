@@ -9,17 +9,21 @@ namespace Agreely\Sdk\Types;
  * form. Mirrors the openapi CheckDecision shape.
  *
  *   decision  -> "allow" | "deny" (ALLOW is the only true)
- *   status    -> "active" | "none" | "revoked" | "expired" | "erased" |
- *                "relationship_ended" ("relationship_ended" -> deny: the company
- *                attested the relationship is over (art. 23); the per-cell consent
- *                stays truthfully active, it was never withdrawn)
- *   consentRef -> 0x-hex enforcement handle; ABSENT (null) when status is "none"
+ *   status    -> the resolved cell state; see {@see CheckStatus} for the full
+ *                eight-value vocabulary and what each one means
+ *   consentRef -> 0x-hex enforcement handle; present for every status BACKED BY A
+ *                RECORD. Null for "none" (no record) and for "necessity" (the allow
+ *                rests on the declared catalog basis, not on a signed consent)
+ *   basis     -> the DECLARED non-consent lawful basis behind a "necessity" allow
+ *                (see {@see CheckBasis}); null for every other status. Agreely
+ *                records the company's declared basis, it does not certify its
+ *                legal validity, and a necessity allow is NEVER a consent artifact
  *   degraded  -> true ONLY when synthesized by the local degrade policy on an
  *                outage (never set on a real server decision)
  *   mode      -> the degrade mode that produced a degraded allow ("fail-open")
  *   assurance -> how the enforcement record was established
  *                ("citizen_signed" | "company_attested"); present whenever a
- *                record exists, null for status "none" and on a degraded result
+ *                record exists, null for "none"/"necessity" and on a degraded result
  */
 final class CheckResult
 {
@@ -31,6 +35,7 @@ final class CheckResult
         public readonly bool $degraded = false,
         public readonly ?string $mode = null,
         public readonly ?string $assurance = null,
+        public readonly ?string $basis = null,
     ) {
     }
 
@@ -43,6 +48,7 @@ final class CheckResult
             Wire::nullableStr($wire['consentRef'] ?? null),
             Wire::str($wire['checkedAt'] ?? null),
             assurance: Wire::nullableStr($wire['assurance'] ?? null),
+            basis: Wire::nullableStr($wire['basis'] ?? null),
         );
     }
 
@@ -50,5 +56,16 @@ final class CheckResult
     public function isAllow(): bool
     {
         return $this->decision === 'allow';
+    }
+
+    /**
+     * True when this allow rests on a DECLARED NON-CONSENT basis (status
+     * "necessity") rather than on a signed consent record. Such an allow carries a
+     * `basis` and no consentRef/assurance, and it must never be presented to a
+     * person or an auditor as "consented".
+     */
+    public function isNecessity(): bool
+    {
+        return $this->status === CheckStatus::NECESSITY;
     }
 }
