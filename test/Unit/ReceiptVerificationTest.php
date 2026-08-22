@@ -6,6 +6,7 @@ namespace Agreely\Sdk\Test\Unit;
 
 use Agreely\Sdk\Agreely;
 use Agreely\Sdk\Crypto\Canonicalizer;
+use Agreely\Sdk\Crypto\Keccak;
 use Agreely\Sdk\Types\Wire;
 use Agreely\Sdk\Verify\ReceiptVerifier;
 use PHPUnit\Framework\Attributes\DataProvider;
@@ -20,6 +21,16 @@ use PHPUnit\Framework\TestCase;
  */
 final class ReceiptVerificationTest extends TestCase
 {
+    /**
+     * The LIVE Base mainnet AgreelyRegistry (deploy block 48889369, the 2026-07-19
+     * redeploy carrying the DID-tagged anchor events), EIP-55 checksummed. Pinned here
+     * so a silent edit of the SDK constant fails a test instead of shipping.
+     */
+    private const LIVE_MAINNET_REGISTRY = '0x23577fafFa306375028D33a559D0F95Ced9424DB';
+
+    /** Its predecessor. Still deployed, still answers, holds NO anchors. Never query it. */
+    private const SUPERSEDED_MAINNET_REGISTRY = '0x1E3121CFB5dfE1ac0b0265790D2bdA709725cF8B';
+
     /**
      * @return array{fixtures: array<string,mixed>, cases: list<array<string,mixed>>}
      */
@@ -165,10 +176,88 @@ final class ReceiptVerificationTest extends TestCase
         ]);
 
         $this->assertSame('pass', $result->documentAnchor);
-        // Prove the check targeted the real deployed Base mainnet registry address.
+        // Prove the check targeted the LIVE deployed Base mainnet registry address.
+        //
+        // This assertion is the whole guard against a silent, invisible correctness bug.
+        // The registry address is pinned BY HAND in ReceiptVerifier (the SDK reads no
+        // config), and a SUPERSEDED registry still exists on chain and still answers
+        // eth_getLogs: it simply holds no anchors. Querying the wrong one therefore does
+        // not error, it returns zero logs, which the verifier reports as
+        // documentAnchor "fail", i.e. a confident FALSE ACCUSATION OF TAMPERING on a
+        // perfectly valid receipt. v0.2.0 shipped exactly that, pinned to the
+        // predecessor 0x1E31...cF8B. If this assertion fails, do not "fix" the test:
+        // confirm the live address against the deployment (agreely-contracts
+        // broadcast/DeployRegistry.s.sol/8453/run-latest.json, and the registryAddress
+        // that verify.agreely.ca publishes) and correct the constant.
         $this->assertNotNull($anchorRequestBody);
-        $this->assertStringContainsString('0x1E3121CFB5dfE1ac0b0265790D2bdA709725cF8B', (string) $anchorRequestBody);
+        $this->assertStringContainsString(self::LIVE_MAINNET_REGISTRY, (string) $anchorRequestBody);
+        $this->assertStringNotContainsString(
+            self::SUPERSEDED_MAINNET_REGISTRY,
+            (string) $anchorRequestBody,
+            'The verifier queried the SUPERSEDED mainnet registry, which holds no anchors: '
+                . 'every documentAnchor check would read as tampering.',
+        );
         $this->assertStringContainsString('eth_getLogs', (string) $anchorRequestBody);
+    }
+
+    /**
+     * The address the verifier ACTUALLY PUTS ON THE WIRE for mainnet must be EIP-55
+     * checksummed. Derived from a real verify() call, not from the test's own copy of
+     * the constant, so this cannot pass tautologically. A mis-cased address still works
+     * over JSON-RPC (addresses compare case-insensitively on chain), so bad casing is
+     * invisible at runtime and would only surface where a human or a checksum-validating
+     * tool reads it.
+     */
+    public function testMainnetRegistryOnTheWireIsEip55Checksummed(): void
+    {
+        $sent = self::captureMainnetAnchorAddress();
+        $this->assertSame(
+            self::eip55($sent),
+            $sent,
+            "The mainnet registry address the verifier sends ({$sent}) is not EIP-55 checksummed.",
+        );
+    }
+
+    /**
+     * The mainnet address on the wire, read back out of the JSON-RPC eth_getLogs
+     * payload the verifier composes. This is what the network would actually receive.
+     */
+    private static function captureMainnetAnchorAddress(): string
+    {
+        $docs = self::didDocuments();
+        $body = (string) json_encode(self::rv()['fixtures']['ipfsBody']);
+        $sent = '';
+
+        Agreely::verifyReceipt(self::citizenReceipt(), [
+            'resolver' => static fn (string $did): ?array => $docs[$did] ?? null,
+            'ipfsGateway' => static fn (string $cid): string => "https://ipfs.test/{$cid}",
+            'httpGet' => static fn (string $url): string => $body,
+            'httpPost' => static function (string $url, string $b) use (&$sent): string {
+                /** @var array<string,mixed> $decoded */
+                $decoded = json_decode($b, true);
+                /** @var list<array<string,mixed>> $params */
+                $params = $decoded['params'];
+                $sent = Wire::str($params[0]['address'] ?? null);
+
+                return (string) json_encode(['result' => []]);
+            },
+            'rpcUrl' => 'https://rpc.test',
+        ]);
+
+        return $sent;
+    }
+
+    private static function eip55(string $address): string
+    {
+        $lower = strtolower((string) preg_replace('/^0x/i', '', $address));
+        $hash = (string) preg_replace('/^0x/', '', Keccak::hashHex($lower));
+        $out = '0x';
+        for ($i = 0; $i < strlen($lower); $i++) {
+            $char = $lower[$i];
+            $out .= ctype_digit($char) || hexdec($hash[$i]) < 8 ? $char : strtoupper($char);
+        }
+
+        return $out;
     }
 
     public function testCorruptedCitizenKeyFailsCleanlyWithNoOpensslWarning(): void
