@@ -4,7 +4,7 @@ All notable changes to `agreely/sdk` (PHP) are documented here. This project
 adheres to [Semantic Versioning](https://semver.org/). Packagist reads the git
 tag as the released version.
 
-## Unreleased (recommend 0.3.0)
+## 0.3.0 - 2026-08-22
 
 ### Fixed
 
