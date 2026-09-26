@@ -349,4 +349,59 @@ final class ResourcesTest extends TestCase
         $this->assertNull($entries[0]->description);
         $this->assertSame('/v1/catalog', $http->calls[0]->path());
     }
+
+    /**
+     * The host's view of the catalogue (scope 'retention', not 'check' / 'issue'):
+     * archived cells included, and the rule that governs each.
+     */
+    public function testCatalogListCellsCarriesTheRegimeAndEachCellsRule(): void
+    {
+        $http = new MockHttpClient([
+            MockHttpClient::json(200, [
+                'regime' => ['sector' => 'public', 'statute' => 'A-2.1'],
+                'cells' => [
+                    [
+                        'id' => 'cell_1',
+                        'category' => 'Adresse courriel',
+                        'purpose' => 'Infolettre',
+                        'description' => null,
+                        'legalBasis' => 'attributions',
+                        'sensitive' => false,
+                        'categoryEn' => 'Email Address',
+                        'purposeEn' => null,
+                        'status' => 'active',
+                        'retentionRuleKey' => 'rule-1',
+                    ],
+                    [
+                        'id' => 'cell_2',
+                        'category' => 'Dossier de plainte',
+                        'purpose' => 'Traitement',
+                        'description' => null,
+                        'legalBasis' => 'programme',
+                        'sensitive' => true,
+                        'categoryEn' => null,
+                        'purposeEn' => null,
+                        'status' => 'archived',
+                        'retentionRuleKey' => null,
+                    ],
+                ],
+            ]),
+        ]);
+        $cells = $this->client($http)->catalog()->listCells();
+
+        $this->assertSame('/v1/catalog/cells', $http->calls[0]->path());
+        $this->assertNotNull($cells->regime);
+        // The regime is here because legalBasis carries two disjoint vocabularies.
+        $this->assertSame('public', $cells->regime->sector);
+        $this->assertSame('A-2.1', $cells->regime->statute);
+        $this->assertCount(2, $cells->cells);
+        $this->assertTrue($cells->cells[0]->hasRule());
+        $this->assertSame('Email Address', $cells->cells[0]->categoryEn);
+        $this->assertTrue($cells->cells[1]->sensitive);
+        $this->assertSame('archived', $cells->cells[1]->status);
+        // A null retentionRuleKey is the register's own gap: the host abstains.
+        $this->assertFalse($cells->cells[1]->hasRule());
+        $this->assertCount(1, $cells->gaps());
+        $this->assertSame('cell_2', $cells->gaps()[0]->id);
+    }
 }

@@ -14,7 +14,9 @@ namespace Agreely\Sdk\Http;
 interface HttpClient
 {
     /**
-     * @param 'GET'|'POST' $method
+     * @param 'GET'|'POST'|'PUT' $method PUT is the inventory declaration, which replaces
+     *   a host system's COMPLETE list rather than appending to it. An implementation
+     *   that whitelists verbs must admit it, or replaceCategories cannot be sent.
      * @param array<string,string> $headers
      * @throws TransportException on a network failure or a timeout
      */

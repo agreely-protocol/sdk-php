@@ -14,8 +14,10 @@ use Agreely\Sdk\Http\RequestSpec;
 use Agreely\Sdk\Http\Transport;
 use Agreely\Sdk\Resources\Catalog;
 use Agreely\Sdk\Resources\ConsentRequests;
+use Agreely\Sdk\Resources\Inventory;
 use Agreely\Sdk\Resources\ManualConsents;
 use Agreely\Sdk\Resources\Relationships;
+use Agreely\Sdk\Resources\Retention;
 use Agreely\Sdk\Types\BatchCheckItem;
 use Agreely\Sdk\Types\BatchDecision;
 use Agreely\Sdk\Types\CheckFieldsResult;
@@ -67,6 +69,8 @@ final class Agreely
     private readonly ManualConsents $manualConsents;
     private readonly Relationships $relationships;
     private readonly Catalog $catalog;
+    private readonly Retention $retention;
+    private readonly Inventory $inventory;
     private readonly string $baseUrl;
 
     /**
@@ -137,6 +141,10 @@ final class Agreely
         $this->manualConsents = new ManualConsents($this->transport);
         $this->relationships = new Relationships($this->transport);
         $this->catalog = new Catalog($this->transport);
+        // The same cap bounds a degraded consent check and a degraded purge run: both
+        // are windows during which the client acts on something other than a live answer.
+        $this->retention = new Retention($this->transport, $maxDegradeWindowMs);
+        $this->inventory = new Inventory($this->transport);
     }
 
     /** The consent-request resource (issuance, scope 'issue'). */
@@ -157,10 +165,35 @@ final class Agreely
         return $this->relationships;
     }
 
-    /** The catalog resource (discovery, scope 'check' OR 'issue'). */
+    /**
+     * The catalog resource: active entries for a consent caller (scope 'check' OR
+     * 'issue'), and every cell with its retention rule for a host (scope 'retention').
+     */
     public function catalog(): Catalog
     {
         return $this->catalog;
+    }
+
+    /**
+     * The host-retention resource (scope 'retention'): read the rules the organisation
+     * DECIDED, and declare the purges and passes a host system ran under them.
+     *
+     * 🔴 It fails closed IN THE OTHER DIRECTION from check(). For a purge job, failing
+     * closed means NOT PURGING: see {@see Retention::rulesForPurge()}.
+     */
+    public function retention(): Retention
+    {
+        return $this->retention;
+    }
+
+    /**
+     * The host inventory resource (scope 'inventory'; the listing also accepts
+     * 'retention', and one statement also accepts 'check'): declare the record sets a
+     * host system holds and read the frozen retention statement to stamp on a record.
+     */
+    public function inventory(): Inventory
+    {
+        return $this->inventory;
     }
 
     /** The configured API base URL (client-side; the resolved endpoint in use). */

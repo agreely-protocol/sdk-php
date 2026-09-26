@@ -6,9 +6,11 @@ namespace Agreely\Sdk\Http;
 
 use Agreely\Sdk\Errors\AgreelyAuthError;
 use Agreely\Sdk\Errors\AgreelyBillingInactiveError;
+use Agreely\Sdk\Errors\AgreelyConflictError;
 use Agreely\Sdk\Errors\AgreelyError;
 use Agreely\Sdk\Errors\AgreelyNotFoundError;
 use Agreely\Sdk\Errors\AgreelyRateLimitError;
+use Agreely\Sdk\Errors\AgreelySweepTooFrequentError;
 use Agreely\Sdk\Errors\AgreelyUnavailableError;
 use Agreely\Sdk\Errors\AgreelyValidationError;
 
@@ -39,6 +41,11 @@ final class Transport
      * `maxRetries` times, honoring Retry-After (outside the per-attempt time
      * budget). A mutating call never auto-retries a 429.
      *
+     * AgreelySweepTooFrequentError is NEVER auto-retried, whatever the call and
+     * whatever maxRetries says: the pass being declared is already represented by
+     * the one declared less than 15 minutes ago, so waiting out the floor and
+     * sending it again records a second pass for the same run.
+     *
      * @return array<string,mixed> the decoded JSON object
      */
     public function request(RequestSpec $spec): array
@@ -48,6 +55,8 @@ final class Transport
         while (true) {
             try {
                 return $this->attempt($spec);
+            } catch (AgreelySweepTooFrequentError $error) {
+                throw $error;
             } catch (AgreelyRateLimitError $error) {
                 if ($rateAttempt >= $rateRetries) {
                     throw $error;
@@ -168,9 +177,22 @@ final class Transport
                 throw new AgreelyValidationError($message, $code ?? 'invalid_request', $res->status, $field);
             case 404:
                 throw new AgreelyNotFoundError($message, $code ?? 'not_found', $res->status);
+            case 409:
+                // A concurrent retry of one declaration could not be settled. Nothing was
+                // recorded under this attempt: retry with the SAME Idempotency-Key.
+                throw new AgreelyConflictError($message, $code ?? 'retry', 409);
+            case 413:
+                // An over-large declaration body. A VALIDATION failure, not an outage: the
+                // default 5xx branch below would have made a caller treat it as transient
+                // and retry a body that can never be accepted.
+                throw new AgreelyValidationError($message, $code ?? 'body_too_large', 413, $field);
             case 429:
                 $header = $res->header('Retry-After');
                 $retryAfter = ($header !== null && is_numeric($header)) ? (int) $header : null;
+                if ($code === 'sweep_too_frequent') {
+                    // The per-(rule, hostSystem) 15-minute floor, not the company window.
+                    throw new AgreelySweepTooFrequentError($message, $code, 429, $retryAfter);
+                }
                 throw new AgreelyRateLimitError($message, 'rate_limited', $res->status, $retryAfter);
             case 402:
                 // The company's Agreely subscription is inactive/lapsed. Fail-closed for

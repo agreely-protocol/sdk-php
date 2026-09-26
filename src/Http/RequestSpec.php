@@ -8,7 +8,7 @@ namespace Agreely\Sdk\Http;
 final class RequestSpec
 {
     /**
-     * @param 'GET'|'POST' $method
+     * @param 'GET'|'POST'|'PUT' $method
      * @param array<string,string|null> $query
      * @param array<string,mixed>|null $body
      * @param array<string,string> $headers
