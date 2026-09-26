@@ -13,7 +13,9 @@ against the live API, so neither drifts from the contract.
 - **One-call DX.** `if ($agreely->check($id, $category, $purpose)) { ... }`
 - **Typed end to end.** Typed result objects, typed errors, PSR-4 / PSR-12, phpstan max.
 - **Fail-closed by default.** On an outage `check()` denies - unless you opt in,
-  explicitly and per-category, to a scoped, audited fail-open.
+  explicitly and per-category, to a scoped, audited fail-open. For a **purge job**,
+  failing closed means **not purging**: see
+  [Host retention](#host-retention-scope-retention).
 - **PHP 8.2+**, `ext-curl` + `ext-json`. Bring your own HTTP client (PSR-18 adapter)
   or use the bundled minimal curl client.
 
@@ -185,6 +187,200 @@ endpoint, not a compliance decision: it reports whether a pending request exists
 it does not assert consent was given. A blank `customerId` throws
 `AgreelyConfigError` before any wire call.
 
+## Host retention (scope `retention`)
+
+« Agreely décide et surveille, l'hôte exécute et rend compte. » Agreely decides the
+retention rules; your systems read them, run their purges, and **declare** what they
+ran. Agreely records the declaration. It observes nothing in your systems and
+verifies none of it, so every write answers `status: "declared"`, never `"verified"`.
+
+```php
+$rules = $agreely->retention()->listRules();          // archived rules included
+// $rules->cursor    -> pass back as changedSince next time (it trails by a few minutes)
+// $rules->ruleKeys  -> the COMPLETE current key set; a key that disappeared was deleted
+$detail = $agreely->retention()->getRule($ruleKey);   // + the host's last declared purge and pass
+
+$cells = $agreely->catalog()->listCells();            // every cell + the rule that governs it
+$cells->gaps();                                       // cells with NO rule: abstain, never guess
+```
+
+A cell whose `retentionRuleKey` is `null` is the register's own gap, surfaced and
+never filled: the host **abstains** and never picks a duration of its own.
+
+### Declaring a purge
+
+```php
+use Agreely\Sdk\Types\PurgeMethod;
+
+$declared = $agreely->retention()->declarePurge($ruleKey, [
+    'ranAt'           => new DateTimeImmutable('now'),  // or RFC 3339 WITH an offset
+    'recordsAffected' => 1_240,                          // 1 .. 1,000,000,000
+    'method'          => PurgeMethod::DESTROYED,         // or ::ANONYMIZED
+    'coveredFrom'     => '2024-01-01',
+    'coveredUntil'    => '2024-06-30',
+    'hostSystem'      => 'billing',                      // a STABLE slug, never a pod name
+    'hostCategory'    => 'invoices',
+], ['idempotencyKey' => "nightly-{$runId}:{$ruleKey}"]);
+```
+
+> **`method` is the past participle, `action` is the infinitive.** A rule's own
+> `action` reads `destroy` / `anonymize`; a declaration of what you DID reads
+> `destroyed` / `anonymized`. They are two separate classes,
+> `RetentionAction` and `PurgeMethod`, so one cannot be mistaken for the other, and
+> passing a rule's word is refused client-side with the word you meant. Derive it
+> instead: `PurgeMethod::forRule($rule->action)`. There is no `aggregated`:
+> aggregation is a technique recorded on an anonymisation process, not a third
+> disposition.
+
+An `anonymized` purge **requires** `anonymizationProcessKey` (never defaulted from
+the rule) and a `destroyed` one refuses it. `references` is optional (your own
+record identifiers, at most 1000 and never more than `recordsAffected`).
+
+### Declaring a pass that found nothing
+
+```php
+$agreely->retention()->declareSweep($ruleKey, [
+    'sweptAt'    => new DateTimeImmutable('now'),  // within the last 24 HOURS
+    'hostSystem' => 'billing',
+], ['idempotencyKey' => "nightly-{$runId}:{$ruleKey}:sweep"]);
+```
+
+The heartbeat: without it, a host with nothing to purge and a host that **stopped**
+purging look the same. The floor is one pass per (rule, `hostSystem`) every 15
+minutes; a second one is `AgreelySweepTooFrequentError`, which this SDK never
+auto-retries. Do not loop on it: the pass already declared stands for this one.
+
+### What is refused before the request leaves
+
+All of these throw `AgreelyConfigError` with **no wire call**, because each one is a
+sure 422 you would otherwise diagnose from a cron log at 3am:
+
+- a missing, malformed or over-long `idempotencyKey`, **or one put in the body** (it
+  is a header; the input shape is closed, so it cannot reach the body)
+- a `method` outside `destroyed` / `anonymized`, an `anonymized` purge with no
+  process key, a `destroyed` one with one
+- `recordsAffected` below 1 (a pass that found nothing is `declareSweep`, not a purge
+  of zero records) or above 1,000,000,000
+- more than 1000 `references`, or more references than `recordsAffected`
+- a `sweptAt` older than 24 hours: a queued retry from yesterday, or a cron on a
+  skewed clock, is dropped here rather than failing remotely for a reason nobody guesses
+- a `hostSystem` or `hostCategory` shaped like an id (a pod name, a uuid, a hash): a
+  value that changes per deploy **burns one of the 10 host systems allowed per 30
+  days** and locks you out within days. Choose `billing`, `crm`, `warehouse` once
+- a naive timestamp with no offset (it would be read in the server's zone and
+  silently re-date the evidence), or a `coveredFrom` / `coveredUntil` that is not
+  `YYYY-MM-DD`
+
+### The idempotency digest is bound to the API key
+
+A replay belongs to the API key that declared. Another key of the same company
+sending the same `Idempotency-Key` records **its own** declaration and never reads
+the first one back. So if you **rotate** your API key while a declaration's response
+was lost, retrying it with the new key records a **second** declaration. Settle every
+pending declaration with the old key before you revoke it.
+
+### A purge job fails closed by NOT PURGING
+
+This is the opposite direction from `check()`, and it is a decision rather than a
+default. The two ways stored rules can be wrong are not symmetrical:
+
+- a rule was **shortened** and you missed it: you keep data somewhat too long. Minor,
+  and the next run that reads the rules corrects it.
+- a rule was **lengthened** (a legal hold, an investigation) and you missed it: you
+  **destroy what you were required to keep**, and that does not repair.
+
+So on an outage the job **abstains**:
+
+```php
+$forRun = $agreely->retention()->rulesForPurge(['snapshot' => $stored]); // $stored may be null
+
+if (!$forRun->mayPurge()) {
+    $log->warning('retention: abstained', ['reason' => $forRun->reason]);
+    return;                     // do NOT purge this run
+}
+foreach ($forRun->rules() as $rule) { /* ... */ }
+$store->put(json_encode($forRun->snapshot?->toArray()));   // for the next run
+```
+
+`rules()` **throws** on an abstain rather than handing back an empty list, because an
+empty list reads as "nothing to purge" and would make a missed run look like a clean
+one. Persist the snapshot with `->toArray()` and rebuild it with
+`RetentionRuleSnapshot::fromArray()`; with a snapshot in hand the next run reads only
+what changed.
+
+Purging on stored rules is opt-in, bounded and audited:
+
+```php
+$forRun = $agreely->retention()->rulesForPurge([
+    'snapshot'       => $stored,
+    'onOutage'       => 'use-snapshot',                  // the explicit word
+    'maxSnapshotAge' => '20h',                            // capped by maxDegradeWindow (24h)
+    'onDegrade'      => fn ($ctx) => $audit->log($ctx),   // MANDATORY, else it throws
+]);
+$forRun->isDegraded();   // true when it proceeded on stored rules
+$forRun->staleForMs;     // how old they were
+```
+
+**Anything that is not an outage throws.** A 401/403, a 402, a 422 and a 429 are not
+"Agreely is down", and treating them as one would hide a key or billing problem behind
+what looks like a skipped night.
+
+## Inventory (scope `inventory`)
+
+A host system declares the record sets it holds and the **names** of their fields,
+never a value. Agreely links each set to a catalogue cell and hands back the frozen
+retention statement you stamp on a record at collection.
+
+> **Source note.** `/v1/inventory/*` is not in the committed `openapi.yaml` as of
+> 2026-09-25; this resource is built from the shipped `InventoryController`. Treat a
+> divergence as a question for the API rather than something to work around.
+
+```php
+$declared = $agreely->inventory()->replaceCategories([
+    'hostSystem' => 'crm',
+    'categories' => [[
+        'key'    => 'beneficiaires',
+        'label'  => 'Bénéficiaires',
+        'labelEn' => 'Beneficiaries',                       // optional, never translated for you
+        'fields' => [
+            ['key' => 'nom',       'label' => 'Nom complet'],
+            ['key' => 'naissance', 'label' => 'Date de naissance'],   // the NAME, never a date
+        ],
+    ]],
+]);
+$declared->withdrawn;   // how many sets this call withdrew
+```
+
+**`replaceCategories` sends a COMPLETE LIST, and what you omit is withdrawn.** It is
+not an append: every set this `hostSystem` declared before that is missing from the
+call is withdrawn (it stays listed, marked withdrawn). Always build the whole list
+from one source of truth, and check `->withdrawn` on a run that meant to change
+nothing. An **empty** list is refused rather than read as "withdraw everything",
+because a serialisation bug must never retire a whole inventory in one call. Also
+refused client-side: more than 50 sets, a set with no fields or more than 60, an
+id-shaped key, and any member outside `key` / `label` / `labelEn` / `fields` (so a
+`value` smuggled into a field object never leaves your process, and the refusal never
+echoes what was sent).
+
+```php
+$sets = $agreely->inventory()->listCategories(['hostSystem' => 'crm']); // withdrawn ones included
+$sets[0]->decision->isDecided();      // false -> no duration: ABSTAIN, never invent one
+$sets[0]->retentionStatement?->text('fr');
+
+$resolved = $agreely->inventory()->getStatement($statementKey);
+$resolved->current;                    // false once superseded, and the terms are STILL the frozen ones
+```
+
+A statement is **frozen**: a record collected under « 3 mois » keeps a key that
+resolves to « 3 mois » after the rule becomes 2. That is the point, not staleness to
+correct.
+
+The scopes differ per method, deliberately: `replaceCategories` needs `inventory`
+(declaring an inventory shapes the register, so a purge cron holding `retention` must
+not be able to rewrite what the organisation says it holds); `listCategories` accepts
+`inventory` or `retention`; `getStatement` also accepts `check`, so a public
+collection form can resolve the sentence it stamps without holding a key that writes.
+
 ## Errors
 
 Every failure is an `Agreely\Sdk\Errors\AgreelyError` subclass - a **deny is not
@@ -197,8 +393,10 @@ an error**.
 | `AgreelyNotFoundError`      | 404                                   |
 | `AgreelyBillingInactiveError` | 402 - the company's Agreely subscription lapsed |
 | `AgreelyRateLimitError`     | 429 (`->retryAfter` seconds)          |
+| `AgreelySweepTooFrequentError` | 429 `sweep_too_frequent` - the per-(rule, hostSystem) 15-minute floor, a subclass of the above. NEVER auto-retried |
+| `AgreelyConflictError`      | 409 `retry` - a declaration lost a race. Retry with the **same** Idempotency-Key |
 | `AgreelyUnavailableError`   | 503 / network / timeout               |
-| `AgreelyConfigError`        | bad client config (thrown at init)    |
+| `AgreelyConfigError`        | bad client config, or input refused before the wire call |
 
 ```php
 use Agreely\Sdk\Errors\AgreelyRateLimitError;
@@ -365,9 +563,17 @@ new Agreely(['apiKey' => $key, 'httpClient' => $myClient]);
 - The public identifier everywhere is the **protocol `requestId`** (`0x` + 64
   hex), never an internal uuid; `consentRef` is `0x`-hex and **absent** when
   status is `none`.
-- Scopes: `check` authorizes `check`; `issue` authorizes the consent-request
-  endpoints; `attest` authorizes manual consents; `relationship` authorizes the
-  relationship end/revert; any scope reads the catalog.
+- **Scopes** (`Agreely\Sdk\Types\Scope`): `check` authorizes `check`; `issue`
+  authorizes the consent-request endpoints; `attest` authorizes manual consents;
+  `relationship` authorizes the relationship end/revert; either `check` or `issue`
+  reads `GET /v1/catalog`; `retention` authorizes the retention rules, the catalogue
+  cells and the purge and pass declarations; `inventory` authorizes the inventory
+  declaration and its reads. `registry` is in the vocabulary because a key can carry
+  it and `identity()` will report it, but **no resource here wraps it**: it reads and
+  writes a named customer's identity record, it is addressed only by a
+  `customer_ref` you already hold, and it has no list endpoint by construction.
+  `identity()` returns whatever the server sends, so a scope added later can reach
+  you at runtime.
 
 ## Open and auditable
 

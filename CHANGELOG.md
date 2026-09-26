@@ -4,6 +4,70 @@ All notable changes to `agreely/sdk` (PHP) are documented here. This project
 adheres to [Semantic Versioning](https://semver.org/). Packagist reads the git
 tag as the released version.
 
+## Unreleased
+
+### Added
+
+- **The host-retention resource** (`$agreely->retention()`, scope `retention`), built
+  from the committed `openapi.yaml`: `listRules` (with `changedSince`), `getRule`,
+  `declarePurge`, `declareSweep`, and `rulesForPurge`, which does the incremental
+  merge and decides the outage for a purge job. `$agreely->catalog()->listCells()`
+  reads every catalogue cell with the rule that governs it; a null `retentionRuleKey`
+  is the register's own gap, surfaced and never filled.
+- **The host inventory resource** (`$agreely->inventory()`, scope `inventory`):
+  `replaceCategories`, `listCategories`, `getStatement`. `/v1/inventory/*` is NOT in
+  the committed `openapi.yaml` as of 2026-09-25, so this resource is built from the
+  shipped `InventoryController` and its shapes are asserted against an implementation
+  rather than a ratified contract.
+- **`RetentionAction` and `PurgeMethod` are two separate classes**, so a rule's own
+  `destroy` / `anonymize` cannot be mistaken for a declaration's `destroyed` /
+  `anonymized`. Sending the rule's word is refused client-side and the message names
+  the word that was meant; `PurgeMethod::forRule()` derives one from the other. There
+  is no `aggregated`: aggregation is a technique recorded on an anonymisation
+  process, not a third disposition.
+- **`Agreely\Sdk\Types\Scope`**, the full scope vocabulary including `registry`,
+  which no resource wraps.
+- **`AgreelySweepTooFrequentError`** (429 `sweep_too_frequent`, the per-(rule,
+  hostSystem) 15-minute floor, a subclass of `AgreelyRateLimitError`) and
+  **`AgreelyConflictError`** (409 `retry`: retry with the SAME Idempotency-Key).
+
+### Changed
+
+- **413 maps to `AgreelyValidationError`**, not `AgreelyUnavailableError`. It fell
+  into the transport's default 5xx branch, which made an over-large body read as a
+  transient outage and therefore retryable, on a body that can never be accepted.
+- **`AgreelySweepTooFrequentError` is never auto-retried**, whatever the call and
+  whatever `maxRetries` says. Waiting out the 15-minute floor and re-sending records
+  a SECOND pass for one run.
+- `HttpClient::send()` accepts `PUT` (the inventory declaration). A custom client
+  that whitelists verbs must admit it.
+
+### Refused before the request leaves
+
+Each of these is a sure refusal at the server, and every one of them is now an
+`AgreelyConfigError` with no wire call: an `Idempotency-Key` placed in a declaration
+body instead of the `$options` argument (the input shapes are closed, so it cannot
+reach the body); an `anonymized` purge with no process key, or a `destroyed` one with
+one; `recordsAffected` below 1 (a pass that found nothing is a sweep) or above
+1,000,000,000; more than 1000 `references` or more references than `recordsAffected`;
+a `sweptAt` older than 24 hours, which is the case nobody guesses from a remote 422
+(a queued retry from yesterday, a cron on a skewed clock); a pod-name or id-shaped
+`hostSystem`, which burns one of the 10 host systems allowed per 30 days per deploy;
+a naive timestamp with no offset; and an empty `categories` list on
+`replaceCategories`, which would otherwise read as « withdraw everything ».
+
+### Fail-closed, in the other direction
+
+For a consent check, failing closed means denying. For a purge job it means NOT
+PURGING: missing a SHORTENED rule keeps data a little too long, while missing a
+LENGTHENED one (a legal hold, an investigation) destroys what had to be kept, and
+that does not repair. So `rulesForPurge` ABSTAINS on an outage, `RulesForPurge::rules()`
+throws on an abstain rather than handing back an empty list that would read as
+"nothing to purge", and purging on a stored snapshot is opt-in, bounded by
+`maxSnapshotAge` and audited through a mandatory `onDegrade`. Anything that is not an
+outage (401/403, 402, 422, 429) throws, so a key or billing problem cannot pass as a
+skipped night.
+
 ## 0.3.0 - 2026-08-22
 
 ### Fixed
