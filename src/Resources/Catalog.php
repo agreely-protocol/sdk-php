@@ -11,7 +11,7 @@ use Agreely\Sdk\Types\CatalogEntry;
 use Agreely\Sdk\Types\Wire;
 
 /**
- * The catalog resource — read-only discovery of the company's declared
+ * The catalog resource: read-only discovery of the company's declared
  * (category, purpose) entries.
  *
  * TWO ENDPOINTS, TWO SCOPES. {@see Catalog::list()} serves the consent callers
