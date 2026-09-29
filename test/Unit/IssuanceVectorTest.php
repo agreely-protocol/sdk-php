@@ -24,15 +24,22 @@ final class IssuanceVectorTest extends TestCase
         $data = json_decode((string) file_get_contents(dirname(__DIR__, 2) . '/vectors/vectors.json'), true);
         self::assertIsArray($data);
         self::assertArrayHasKey('issuanceRequest', $data, 'vectors.json must carry the issuanceRequest section.');
-        return $data['issuanceRequest'];
+        $golden = $data['issuanceRequest'];
+        self::assertIsArray($golden);
+        /** @var array<string,mixed> $golden */
+        return $golden;
     }
 
     /** @return iterable<string, array{0: array<string,mixed>, 1: array<string,mixed>}> */
     public static function cases(): iterable
     {
         $golden = self::golden();
-        foreach ($golden['cases'] as $case) {
-            yield $case['name'] => [$golden, $case];
+        $cases = $golden['cases'];
+        self::assertIsArray($cases);
+        foreach ($cases as $case) {
+            self::assertIsArray($case);
+            /** @var array<string,mixed> $case */
+            yield self::str($case['name']) => [$golden, $case];
         }
     }
 
@@ -44,10 +51,13 @@ final class IssuanceVectorTest extends TestCase
     private function buildInput(array $golden, array $case): array
     {
         $input = $golden['base'];
-        if (in_array('consentDocumentId', $case['use'], true)) {
+        self::assertIsArray($input);
+        $use = $case['use'];
+        self::assertIsArray($use);
+        if (in_array('consentDocumentId', $use, true)) {
             $input['consentDocumentId'] = $golden['consentDocumentId'];
         }
-        if (in_array('documentCode', $case['use'], true)) {
+        if (in_array('documentCode', $use, true)) {
             $input['documentCode'] = $golden['documentCode'];
         }
         // The wire envelope must DROP a caller-supplied items list (items
@@ -55,6 +65,7 @@ final class IssuanceVectorTest extends TestCase
         if ($case['includeItems']) {
             $input['items'] = $golden['rejectedItems'];
         }
+        /** @var array<string,mixed> $input */
         return $input;
     }
 
@@ -76,9 +87,13 @@ final class IssuanceVectorTest extends TestCase
         $http = new MockHttpClient([MockHttpClient::json(201, $issued)]);
         $agreely = new Agreely(['apiKey' => 'agr_live_test', 'timeout' => 5000, 'httpClient' => $http]);
 
-        if (($case['expect']['error'] ?? null) === 'config') {
+        $expect = $case['expect'];
+        self::assertIsArray($expect);
+        /** @var array{customerId:string,recipientEmail:string,consentDocumentId?:string,documentCode?:string,validUntil:string} $input */
+        $input = $this->buildInput($golden, $case);
+        if (($expect['error'] ?? null) === 'config') {
             try {
-                $agreely->consentRequests()->create($this->buildInput($golden, $case));
+                $agreely->consentRequests()->create($input);
                 $this->fail('Expected AgreelyConfigError.');
             } catch (AgreelyConfigError) {
                 // expected
@@ -87,14 +102,20 @@ final class IssuanceVectorTest extends TestCase
             return;
         }
 
-        $agreely->consentRequests()->create($this->buildInput($golden, $case));
+        $agreely->consentRequests()->create($input);
         $this->assertCount(1, $http->calls);
         $call = $http->calls[0];
-        $this->assertSame($case['expect']['method'], $call->method);
-        $this->assertSame($case['expect']['path'], $call->path());
+        $this->assertSame($expect['method'], $call->method);
+        $this->assertSame($expect['path'], $call->path());
         // EXACT envelope: the body deep-equals the golden body — no items key,
         // no second document reference, nothing extra (TS<->PHP parity).
-        $this->assertEquals($case['expect']['body'], $call->body);
+        $this->assertEquals($expect['body'], $call->body);
         $this->assertNotNull($call->header('Idempotency-Key'));
+    }
+
+    private static function str(mixed $value): string
+    {
+        self::assertIsString($value);
+        return $value;
     }
 }

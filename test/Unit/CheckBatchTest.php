@@ -57,6 +57,7 @@ final class CheckBatchTest extends TestCase
         $this->assertSame('/v1/check/batch', $call->path());
         $this->assertSame('Bearer agr_live_test', $call->header('Authorization'));
         $this->assertNotNull($call->body);
+        $this->assertIsArray($call->body['items']);
         $this->assertCount(2, $call->body['items']);
     }
 
@@ -70,8 +71,12 @@ final class CheckBatchTest extends TestCase
         ]);
         $call = $http->calls[0];
         $this->assertNotNull($call->body);
-        $this->assertSame('  Email   ADDRESS ', $call->body['items'][0]['category']);
-        $this->assertSame("Marketing\tOutreach", $call->body['items'][0]['purpose']);
+        $items = $call->body['items'];
+        $this->assertIsArray($items);
+        $first = $items[0];
+        $this->assertIsArray($first);
+        $this->assertSame('  Email   ADDRESS ', $first['category']);
+        $this->assertSame("Marketing\tOutreach", $first['purpose']);
     }
 
     public function testCheckBatchAcceptsBothBatchCheckItemAndArray(): void
@@ -85,6 +90,7 @@ final class CheckBatchTest extends TestCase
         ]);
         $call = $http->calls[0];
         $this->assertNotNull($call->body);
+        $this->assertIsArray($call->body['items']);
         $this->assertCount(2, $call->body['items']);
     }
 
