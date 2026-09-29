@@ -4,10 +4,57 @@ All notable changes to `agreely/sdk` (PHP) are documented here. This project
 adheres to [Semantic Versioning](https://semver.org/). Packagist reads the git
 tag as the released version.
 
-## Unreleased
+## 0.4.0 - 2026-09-29
+
+Aligns the client with the production /v1 API as deployed on 2026-09-29 (the verbal
+tier, issue #100, and the informed-line rules). **A minor bump because it breaks**:
+before 1.0 a breaking change moves the minor version. A status was removed, the
+meaning of `approved` changed, and two closed vocabularies gained values that code
+switching on them exhaustively must now handle.
+
+### Breaking
+
+- **`CheckStatus::SENSITIVE_REQUIRES_CONSENT` is removed.** The API stopped emitting
+  `sensitive_requires_consent` on 2026-09-28: a sensitive cell now answers by its
+  declared basis like any other (`necessity` + `basis` on a non-consent ground, `none`
+  on `consent`). Code referencing the constant no longer compiles; delete that branch.
+- **`approved` no longer covers an all-declined answer.** A consent request whose
+  every consent ask was declined (only the informed lines acknowledged) reads the new
+  `asks_declined` status, is never returned under `?status=approved`, and is terminal.
+  `approved` now means at least one ask was accepted. `ConsentRequestStatus` names the
+  vocabulary; `waitForSettlement()` returns on `asks_declined`.
+- **Closed vocabularies gained values.** `assurance` adds `company_documented`, the
+  new `tier` field reads `full | manual | verbal`, `CheckStatus::ALL` adds
+  `requires_depersonalization` and `basis_not_in_regime` (both already on the wire),
+  `CheckBasis::ALL` adds the seven public-body (A-2.1) bases, and
+  `ReceiptVerification::$receiptType` adds `company_documented`.
 
 ### Added
 
+- **`$agreely->verbalConsents()`**: `record()` (POST /v1/verbal-consents, scope
+  `attest_verbal`), `confirmWithPaper()` (the signed paper, scope `attest`) and
+  `get()` (the history, either scope), with `VerbalConsentResult`,
+  `VerbalPaperResult`, `VerbalConsentHistory`, `VerbalPurpose` (whose `answer` may be
+  `informed`) and `RepresentativeCapacity` (including `titulaire_autorite_parentale`
+  and `tuteur_mineur` for a minor under 14). `isMinor`, `paperExpected` and
+  `sensitiveExpressAttested` are sent only as JSON `true`. Every answer must be the
+  string `yes` or `no`; anything else is refused before the call.
+- **`tier` on `CheckResult` and `BatchDecision`**, and the `Assurance` and
+  `ConsentTier` vocabularies, with `ConsentTier::atLeast()`, which never accepts an
+  unknown or null tier. An acknowledged informed line carries no assurance and no
+  tier, even once withdrawn.
+- **`Scope::ATTEST_VERBAL`.**
+- **`ManualConsentResult::$acknowledged` and `$asksDeclined`**: the informed lines the
+  server added as acknowledgements, and whether no ask was consented. `items` may be
+  empty.
+- **`ManualConsentRevocation::$gate`** (`denied | superseded | unchanged`): what
+  /v1/check does now for that purpose. A `superseded` withdrawal leaves a later
+  consent backing the gate.
+- **`AgreelyVerbalDailyCapError`** (429 `verbal_daily_cap`, a subclass of
+  `AgreelyRateLimitError`), never auto-retried.
+- **`AgreelyConflictError::isStateConflict()` and `isRetryable()`**: a 409 `conflict`
+  (a covered purpose, an ended relationship, a paper already recorded, a paper while a
+  verbal consent awaits its own) is no longer documented as something to retry.
 - **The host-retention resource** (`$agreely->retention()`, scope `retention`), built
   from the committed `openapi.yaml`: `listRules` (with `changedSince`), `getRule`,
   `declarePurge`, `declareSweep`, and `rulesForPurge`, which does the incremental
@@ -30,6 +77,32 @@ tag as the released version.
 - **`AgreelySweepTooFrequentError`** (429 `sweep_too_frequent`, the per-(rule,
   hostSystem) 15-minute floor, a subclass of `AgreelyRateLimitError`) and
   **`AgreelyConflictError`** (409 `retry`: retry with the SAME Idempotency-Key).
+
+### Fixed
+
+- **A verbal receipt was reported as a tampered citizen receipt.** `verifyReceipt()`
+  read a `VerbalConsentReceipt` as a citizen receipt, found no passkey assertion and
+  answered `citizenAssertion: "fail"`, `overall: "failed"`: a false accusation of
+  tampering on genuine evidence. It is now `receiptType: "company_documented"`: the
+  company signature is checked like a paper receipt's, the citizen assertion is
+  `unsupported`, and `overall` is at most `partial` (never `verified`), because the
+  signature proves only that the organisation documented a telephone consent.
+- **Stale idempotency documentation.** On the manual and verbal endpoints the server
+  now binds the Idempotency-Key to the endpoint and to the request body. A key you
+  pass is checked (1 to 255 printable ASCII characters) before the call.
+- **`consentRequests()->list()`** refuses a filter or cursor sent as a list before the
+  call; the server answers 400.
+
+### Documented
+
+- `validUntil` on every consent write: a plain date means through the end of that
+  calendar day in the organisation's timezone, an instant needs an offset, a relative
+  phrase is refused, and ten years after the start is the ceiling (an Agreely product
+  rule, not a statutory limit).
+- Paper consents: a notice-only document, an empty or non-PDF file, the SHA-256 of
+  zero bytes and an escrowed PDF that does not match its hash are refused (422); a
+  paper for a customer and document while a verbal consent awaits its paper is a 409.
+- Claim links: an unknown customer is a 404, an ended relationship a 409.
 
 ### Changed
 

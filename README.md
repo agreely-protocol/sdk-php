@@ -44,9 +44,11 @@ if ($agreely->check('cust_8812', 'Phone number', 'Billing')) {
 ```php
 $d = $agreely->checkDetailed('cust_8812', 'Phone number', 'Billing');
 // $d->decision   "allow" | "deny"   (ALLOW is the only true)
-// $d->status     one of the eight values below (Agreely\Sdk\Types\CheckStatus)
+// $d->status     one of the nine values below (Agreely\Sdk\Types\CheckStatus)
 // $d->consentRef "0x…"  (null for "none" and for "necessity")
-// $d->assurance  "citizen_signed" | "company_attested"  (null for "none"/"necessity")
+// $d->assurance  "citizen_signed" | "company_attested" | "company_documented"
+//                (null for "none"/"necessity" and for an acknowledged informed line)
+// $d->tier       "full" | "manual" | "verbal"  (present exactly when assurance is)
 // $d->basis      the declared non-consent basis  (ONLY on "necessity", else null)
 // $d->checkedAt  "2026-…Z"
 ```
@@ -56,7 +58,7 @@ throw. Errors (auth, validation, rate-limit, outage) throw typed errors.
 
 ### The status vocabulary
 
-Two statuses allow, six deny:
+Two statuses allow, seven deny:
 
 | status | decision | what it means |
 | --- | --- | --- |
@@ -66,12 +68,16 @@ Two statuses allow, six deny:
 | `revoked` | deny | the consent was withdrawn (art. 14) |
 | `expired` | deny | the consent lifespan elapsed (art. 14 al. 3) |
 | `relationship_ended` | deny | the company attested the purposes are accomplished (art. 23). A relationship-level stop: the per-cell consent stays truthfully active, it was never withdrawn. |
-| `sensitive_requires_consent` | deny | no record, and the company declared the cell sensitive, so it fails closed to express consent (art. 12 al. 1 in fine / art. 13) |
+| `requires_depersonalization` | deny | the cell declares a ground the act carries only for depersonalized information (A-2.1 art. 65.1 al. 2 (4°)). Not "no consent on record": never answer it by collecting a consent. |
+| `basis_not_in_regime` | deny | the cell declares a ground the tenant's act does not carry (typically the other sector's vocabulary). The fix is a catalog re-declaration. |
 | `erased` | deny | listed by `openapi.yaml`, **not currently emitted**. Erasure crypto-shreds the record, so an erased cell reads back as `none`. |
 
 **A `necessity` allow is not a consent.** It rests on a basis the company
 *declared* on its catalog (`contract`, `necessary_for_service`, `security_fraud`,
-`legal_obligation`, `professional_contact`), there is no signed proof behind it,
+`legal_obligation`, `professional_contact` for a private enterprise under P-39.1;
+`attributions`, `programme`, `entente_collecte`, `compatible_use`,
+`manifest_benefit`, `law_application`, `public_character` for a public body under
+A-2.1; see `CheckBasis::PRIVATE` / `CheckBasis::PUBLIC`), there is no signed proof behind it,
 and Agreely does not certify its legal validity. Never present it to a person or
 an auditor as "consented":
 
@@ -83,6 +89,43 @@ if ($d->isNecessity()) {
 
 Treat any status you do not recognise as a **deny**: read `$d->decision`, which is
 only ever `allow` or `deny`.
+
+**`sensitive_requires_consent` is gone** (no longer emitted since 2026-09-28, and the
+constant was removed in 0.4.0). A cell declared sensitive answers by its basis like
+any other: on `consent` it denies `none` without a record (and that consent must be
+express), on a non-consent ground it allows `necessity` with its `basis`.
+
+**An acknowledged informed line is not a consent.** A line a document gives for
+information, recorded as the person's acknowledgement on a paper or telephone
+record, answers exactly like no record (`necessity` + `basis`, or `none`), with no
+`consentRef`, no `assurance` and no `tier`. Once withdrawn it denies `revoked` with
+a `consentRef`, still with no `assurance` or `tier`.
+
+### Tier and assurance: the host decides
+
+Every record-backed answer names the proof behind it twice: `assurance`
+(`Agreely\Sdk\Types\Assurance`) and `tier` (`Agreely\Sdk\Types\ConsentTier`).
+
+| tier | assurance | what backs it |
+| --- | --- | --- |
+| `full` | `citizen_signed` | the person signed with their own passkey |
+| `manual` | `company_attested` | the company attests to a hand-signed paper |
+| `verbal` | `company_documented` | the person consented **by telephone** and the organisation documented it; there is no document at all |
+
+A manual or verbal consent allows **identically** at the gate; only the tier
+differs, and **your code decides** what each tier may unlock. Neither P-39.1 s. 14
+nor A-2.1 s. 53.1 requires a consent to be in writing, so this is your choice of
+evidence, not a statutory threshold. Treat an assurance or tier you do not know as
+**not acceptable**:
+
+```php
+use Agreely\Sdk\Types\ConsentTier;
+
+$d = $agreely->checkDetailed('cust_8812', 'Revenu', 'Étude de crédit');
+if ($d->isAllow() && ($d->isNecessity() || ConsentTier::atLeast($d->tier, ConsentTier::MANUAL))) {
+    // this use requires at least a signed paper
+}
+```
 
 ### Issue a consent request (no UI)
 
@@ -100,6 +143,13 @@ $r = $agreely->consentRequests()->create([
 // $r->status "pending"; $r->deepLink; $r->emailDelivered; $r->items
 ```
 
+**`validUntil`, on every consent write** (consent request, paper, telephone): a plain
+date (`2031-01-01`) means through the **end of that calendar day in the organisation's
+timezone**; an instant must be RFC 3339 **with an offset**. A relative phrase
+(`+1 year`, `next year`) is refused, and so is an end more than **ten years** after the
+consent's start. The ten-year ceiling is an Agreely product rule, not a statutory
+limit: the acts limit a consent to the time its purposes need.
+
 `create` is **never auto-retried** (it emails). The SDK attaches a unique
 `Idempotency-Key` per call; pass your own to make a retry replay the original 201
 instead of issuing twice:
@@ -110,20 +160,20 @@ $agreely->consentRequests()->create($input, ['idempotencyKey' => 'order-4471']);
 
 ### Idempotency
 
-The server honours `Idempotency-Key` on **both** `consentRequests()->create` and
-`manualConsents()->record`: a retry with the same key replays the original 201
-byte-for-byte and records nothing new, so a dropped connection can never
-double-issue or double-attest.
+The server honours `Idempotency-Key` on `consentRequests()->create`,
+`manualConsents()->record`, `verbalConsents()->record` and
+`verbalConsents()->confirmWithPaper`: a retry with the same key replays the original
+201 and records nothing new, so a dropped connection can never double-issue or
+double-attest. The SDK generates a key per call; pass your own only when you have a
+durable, operation-unique id.
 
-The key is the whole contract. The replay is keyed on **(company, key)** alone,
-not on the request body and not on the endpoint. So:
-
-- reusing a key with a **different payload** silently replays the *first* payload
-  and writes nothing;
-- a key already spent on `consentRequests()->create` will replay **that** response
-  from `manualConsents()->record`.
-
-Leave the key unset unless you have a durable, operation-unique id.
+- On the **manual and verbal** endpoints the key is **bound to the endpoint and to the
+  request body**: the same key with a different body is a new request, and a key
+  spent on one endpoint never replays another. It must be 1 to 255 printable ASCII
+  characters; the SDK refuses anything else before the call (`AgreelyConfigError`).
+- On `consentRequests()->create` the replay is keyed on **(company, key)** alone:
+  reusing a key with a different payload replays the *first* payload and writes
+  nothing.
 
 ### End / revert a customer relationship (art. 23)
 
@@ -156,16 +206,24 @@ window, or after any destruction) is a clean 404 with nothing written.
 ```php
 $page = $agreely->consentRequests()->list([
     'customerId' => 'cust_8812',  // filter to one subject ref (optional)
-    'status'     => 'pending',    // pending|approved|refused|expired|revoked_before_action (optional)
+    'status'     => 'pending',    // a ConsentRequestStatus value (optional)
     'limit'      => 50,           // page size, default 50, max 100 (optional)
     'cursor'     => $cursor,      // a prior nextCursor (optional)
 ]);
 // $page->items (list<ConsentRequestRecord>); $page->nextCursor (null when exhausted).
 // Metadata only, newest first. Each record now carries ->customerId and ->documentCode.
+// A filter or cursor must be a single string: a list is refused before the call.
 
 $one     = $agreely->consentRequests()->get('0x…'); // the protocol requestId, NOT a uuid
 $catalog = $agreely->catalog()->list();             // discovery for issuance
 ```
+
+**`approved` means a consent was obtained.** It means the person confirmed and, when
+the request carried consent asks, accepted **at least one**. A person who confirmed
+only her receipt of the lines given for information and declined **every** ask reads
+`asks_declined` (`ConsentRequestStatus::ASKS_DECLINED`): no consent was obtained, it is
+never returned as `approved` nor under `?status=approved`, and it is terminal, so
+`waitForSettlement()` returns on it. Before 0.4.0 that outcome read `approved`.
 
 **Dedup before issuing.** `hasPending` answers "is a consent request already
 outstanding for this customer?" so you do not re-issue (and re-email):
@@ -186,6 +244,116 @@ request for the customer. This is a **metadata convenience** over the list
 endpoint, not a compliance decision: it reports whether a pending request exists,
 it does not assert consent was given. A blank `customerId` throws
 `AgreelyConfigError` before any wire call.
+
+## Paper consents (scope `attest`)
+
+Record a consent the person signed on paper. `items` names the consent **asks ticked
+on the sheet**, and may be empty (every ask answered "no"). The server adds every line
+the document gives for information as an acknowledgement (never a consent) and
+ignores one you post.
+
+```php
+$paper = $agreely->manualConsents()->record([
+    'customerId'        => 'cust_8812',
+    'documentVersionId' => $documentVersionId,
+    'effectiveDate'     => '2026-09-29',
+    'validUntil'        => '2027-09-29',
+    'items'             => [['category' => 'Courriel', 'purpose' => 'Infolettre']],
+    'evidence'          => ['pdfSha256' => Agreely::hashPdfFile($path)],  // add 'pdf' => base64 to escrow it
+]);
+$paper->acknowledged;   // list<AcknowledgedLine>: the informed lines, never consents
+$paper->asksDeclined;   // true when no ask was consented
+```
+
+Refused with a 422: a document that asks no consent (a collection notice), an empty
+file or the SHA-256 of zero bytes, a file that is not a PDF, an escrowed PDF that does
+not hash to `pdfSha256`, and the `validUntil` rules above. Refused with a 409
+(`AgreelyConflictError`, code `conflict`): a purpose already held by an active
+passkey consent, and a paper for a customer and document while a **verbal consent
+awaits its paper** (send that paper with `verbalConsents()->confirmWithPaper()`).
+
+`createClaimLink()` answers `AgreelyNotFoundError` for a customer the company holds
+no record of, and `AgreelyConflictError` once the relationship has ended.
+
+`revoke()` withdraws a manual **or verbal** cell and says what the gate does now in
+`->gate`: `denied` (this consent backed it), `superseded` (a later consent for the
+same purpose already backs the gate, which **still allows**), or `unchanged` (an
+idempotent repeat). Withdrawing the manual cell that confirmed a verbal one withdraws
+that verbal cell too.
+
+## Telephone consents (scopes `attest_verbal` and `attest`)
+
+A consent the person gave **by telephone**, documented by the organisation: the
+weakest of the three tiers, since there is no document at all. Every result and
+every `/v1/check` answer names it tier `verbal`, assurance `company_documented`;
+never call it signed, validated or certified.
+
+```php
+use Agreely\Sdk\Types\RepresentativeCapacity;
+
+$call = $agreely->verbalConsents()->record([
+    'customerId'        => 'cust_8812',
+    'documentVersionId' => $documentVersionId,
+    'answers'           => [                          // every ask put on the call, "yes" or "no"
+        ['category' => 'Courriel', 'purpose' => 'Infolettre', 'answer' => 'yes'],
+        ['category' => 'Courriel', 'purpose' => 'Sondages',   'answer' => 'no'],
+    ],
+    'obtainedAt'        => new DateTimeImmutable('now'),   // the call; RFC 3339 with an offset, at most 7 days old
+    'obtainedBy'        => 'Julie, service client',
+    'scriptVersion'     => 'script-2026.09',
+    'respondent'        => ['consentedBy' => 'self'],
+    'validUntil'        => '2027-09-29',
+    'paperExpected'     => true,
+]);
+$call->tier;           // "verbal"
+$call->consentRefs;    // the "yes" purposes and the acknowledged lines
+
+// For a minor under 14: 'isMinor' => true, and the respondent is the parent or tutor.
+// 'respondent' => ['consentedBy' => 'representative',
+//     'representativeCapacity' => RepresentativeCapacity::TITULAIRE_AUTORITE_PARENTALE,
+//     'name' => 'Marie Tremblay'],
+```
+
+- Answer **only** the consent asks, each once, with the string `yes` or `no` (a
+  boolean is refused before the call). A line given for information is never
+  answered: the server refuses it (422) and records it itself as acknowledged.
+- `sensitiveExpressAttested` must be `true` when a "yes" purpose is sensitive and
+  rests on the consent basis. `isMinor`, `paperExpected` and
+  `sensitiveExpressAttested` are sent only when `true`.
+- A purpose already held by an active paper or passkey consent, or a relationship
+  that has ended, is a 409 `AgreelyConflictError` (code `conflict`): do not retry.
+- The organisation's daily limit of verbal consents is a 429
+  `AgreelyVerbalDailyCapError`, which the SDK never auto-retries.
+
+**The signed paper came back** (scope `attest`: a key holding only `attest_verbal`
+gets a 403, because the paper mints a company-attested consent):
+
+```php
+$rise = $agreely->verbalConsents()->confirmWithPaper($call->consentId, [
+    'signedAt' => new DateTimeImmutable('now'),        // the evidence date, no earlier than the call
+    'answers'  => [['category' => 'Courriel', 'purpose' => 'Infolettre', 'answer' => 'yes']],
+    'evidence' => ['pdfSha256' => Agreely::hashPdfFile($path)],
+]);
+$rise->confirmed;   // each verbal cell with the NEW manual cell the gate now reads
+$rise->withdrawn;   // the purposes unticked on the paper, withdrawn as of signedAt
+```
+
+The verbal consent is never rewritten: each ticked purpose moves into a new manual
+consent dated from the call, and an unticked one is recorded as a withdrawal dated at
+the signature. `answers` holds exactly the purposes still consented by telephone. One
+paper per verbal consent (a second is a 409).
+
+```php
+$history = $agreely->verbalConsents()->get($call->consentId);   // 'attest_verbal' or 'attest'
+$history->state;                 // awaiting_paper | verbal_only | paper_received
+$history->purposes[0]->answer;   // yes | no | informed
+$history->purposes[0]->confirmedBy;   // the manual cell to withdraw once the paper came back
+```
+
+Withdraw a verbal cell with `manualConsents()->revoke()` (`attest` or
+`attest_verbal`; a verbal-only key reaches verbal refs only), erase it with
+`manualConsents()->erase()` (`attest` only). A verbal ref whose paper came back
+answers 409: act on the confirming manual ref instead.
 
 ## Host retention (scope `retention`)
 
@@ -394,7 +562,8 @@ an error**.
 | `AgreelyBillingInactiveError` | 402 - the company's Agreely subscription lapsed |
 | `AgreelyRateLimitError`     | 429 (`->retryAfter` seconds)          |
 | `AgreelySweepTooFrequentError` | 429 `sweep_too_frequent` - the per-(rule, hostSystem) 15-minute floor, a subclass of the above. NEVER auto-retried |
-| `AgreelyConflictError`      | 409 `retry` - a declaration lost a race. Retry with the **same** Idempotency-Key |
+| `AgreelyVerbalDailyCapError` | 429 `verbal_daily_cap` - the organisation's daily limit of verbal consents, a subclass of the rate-limit error. NEVER auto-retried |
+| `AgreelyConflictError`      | 409. Code `retry` (`->isRetryable()`): a declaration lost a race, retry with the **same** Idempotency-Key. Code `conflict` (`->isStateConflict()`): the request contradicts the record's state (a covered purpose, an ended relationship, a paper already recorded); retrying changes nothing |
 | `AgreelyUnavailableError`   | 503 / network / timeout               |
 | `AgreelyConfigError`        | bad client config, or input refused before the wire call |
 
@@ -564,7 +733,10 @@ new Agreely(['apiKey' => $key, 'httpClient' => $myClient]);
   hex), never an internal uuid; `consentRef` is `0x`-hex and **absent** when
   status is `none`.
 - **Scopes** (`Agreely\Sdk\Types\Scope`): `check` authorizes `check`; `issue`
-  authorizes the consent-request endpoints; `attest` authorizes manual consents;
+  authorizes the consent-request endpoints; `attest` authorizes manual consents, the
+  paper of a verbal consent, and revoke and erase of any company-recorded cell;
+  `attest_verbal` (never granted by default) authorizes recording a telephone consent,
+  reading its history, and revoking verbal cells only;
   `relationship` authorizes the relationship end/revert; either `check` or `issue`
   reads `GET /v1/catalog`; `retention` authorizes the retention rules, the catalogue
   cells and the purge and pass declarations; `inventory` authorizes the inventory
