@@ -18,6 +18,7 @@ use Agreely\Sdk\Resources\Inventory;
 use Agreely\Sdk\Resources\ManualConsents;
 use Agreely\Sdk\Resources\Relationships;
 use Agreely\Sdk\Resources\Retention;
+use Agreely\Sdk\Resources\VerbalConsents;
 use Agreely\Sdk\Types\BatchCheckItem;
 use Agreely\Sdk\Types\BatchDecision;
 use Agreely\Sdk\Types\CheckFieldsResult;
@@ -67,6 +68,7 @@ final class Agreely
     private readonly DegradePolicy $degrade;
     private readonly ConsentRequests $consentRequests;
     private readonly ManualConsents $manualConsents;
+    private readonly VerbalConsents $verbalConsents;
     private readonly Relationships $relationships;
     private readonly Catalog $catalog;
     private readonly Retention $retention;
@@ -139,6 +141,7 @@ final class Agreely
 
         $this->consentRequests = new ConsentRequests($this->transport);
         $this->manualConsents = new ManualConsents($this->transport);
+        $this->verbalConsents = new VerbalConsents($this->transport);
         $this->relationships = new Relationships($this->transport);
         $this->catalog = new Catalog($this->transport);
         // The same cap bounds a degraded consent check and a degraded purge run: both
@@ -157,6 +160,15 @@ final class Agreely
     public function manualConsents(): ManualConsents
     {
         return $this->manualConsents;
+    }
+
+    /**
+     * The verbal (telephone, documented by the organisation) consent resource: record
+     * needs 'attest_verbal', the signed paper needs 'attest', the history accepts either.
+     */
+    public function verbalConsents(): VerbalConsents
+    {
+        return $this->verbalConsents;
     }
 
     /** The customer-relationship lifecycle resource (scope 'relationship'). */

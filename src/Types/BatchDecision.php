@@ -10,7 +10,10 @@ namespace Agreely\Sdk\Types;
  * echoed (customerRef, category, purpose) for correlation.
  *
  * `basis` carries the DECLARED non-consent lawful basis behind a "necessity" allow
- * (see {@see CheckBasis}) and is null for every other status.
+ * (see {@see CheckBasis}) and is null for every other status. `assurance` and
+ * `tier` carry the proof behind a record-backed answer ({@see Assurance},
+ * {@see ConsentTier}) and are null otherwise, including for an acknowledged
+ * informed line. Treat an unknown assurance or tier as NOT acceptable.
  */
 final class BatchDecision
 {
@@ -24,6 +27,7 @@ final class BatchDecision
         public readonly ?string $assurance,
         public readonly string $checkedAt,
         public readonly ?string $basis = null,
+        public readonly ?string $tier = null,
     ) {
     }
 
@@ -40,6 +44,7 @@ final class BatchDecision
             Wire::nullableStr($wire['assurance'] ?? null),
             Wire::str($wire['checkedAt'] ?? null),
             Wire::nullableStr($wire['basis'] ?? null),
+            Wire::nullableStr($wire['tier'] ?? null),
         );
     }
 

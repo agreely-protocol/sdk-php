@@ -9,7 +9,11 @@ namespace Agreely\Sdk\Types;
  *
  *   CHECK        the synchronous consent check, and GET /v1/catalog
  *   ISSUE        consent-request issuance and its reads, and GET /v1/catalog
- *   ATTEST       manual / offline (company-attested) consent recording
+ *   ATTEST       manual / offline (company-attested) consent recording, the signed
+ *                paper of a verbal consent, revoke and erase of any company-recorded cell
+ *   ATTEST_VERBAL verbal (telephone, documented by the organisation) consent recording
+ *                and its history. Never granted by default. A key holding only this
+ *                scope may revoke VERBAL cells only, and cannot erase or record a paper.
  *   RELATIONSHIP ending a customer relationship (art. 23)
  *   REGISTRY     the customer registry. NO SDK RESOURCE WRAPS IT: it is in the
  *                vocabulary because a key can carry it and identity() will report
@@ -35,6 +39,7 @@ final class Scope
     public const CHECK        = 'check';
     public const ISSUE        = 'issue';
     public const ATTEST       = 'attest';
+    public const ATTEST_VERBAL = 'attest_verbal';
     public const RELATIONSHIP = 'relationship';
     public const REGISTRY     = 'registry';
     public const RETENTION    = 'retention';
@@ -45,6 +50,7 @@ final class Scope
         self::CHECK,
         self::ISSUE,
         self::ATTEST,
+        self::ATTEST_VERBAL,
         self::RELATIONSHIP,
         self::REGISTRY,
         self::RETENTION,

@@ -524,4 +524,154 @@ final class ReceiptVerificationTest extends TestCase
         }
         self::fail('no citizen case in vectors');
     }
+
+    public function testAGenuineVerbalReceiptIsCompanyDocumentedAndAtMostPartial(): void
+    {
+        [$receipt, $resolver] = self::verbalReceipt();
+        $result = Agreely::verifyReceipt($receipt, ['resolver' => $resolver]);
+
+        $this->assertSame('company_documented', $result->receiptType);
+        $this->assertSame('pass', $result->companySignature);
+        $this->assertSame('unsupported', $result->citizenAssertion);
+        $this->assertSame('pass', $result->cellLabelBinding);
+        $this->assertSame('partial', $result->overall, 'a telephone consent is never "verified"');
+        $matched = false;
+        foreach ($result->notes as $note) {
+            $documented = str_contains($note, 'documented a telephone consent under script version script-2026.09');
+            if ($documented && str_contains($note, 'no signed paper')) {
+                $matched = true;
+            }
+            $this->assertStringNotContainsString('hand-signed PDF', $note);
+        }
+        $this->assertTrue($matched, 'expected the documented-by-the-organisation note');
+    }
+
+    public function testATamperedVerbalReceiptFails(): void
+    {
+        [$receipt, $resolver] = self::verbalReceipt();
+        /** @var array<string,mixed> $subject */
+        $subject = $receipt['credentialSubject'];
+        /** @var array<string,mixed> $consent */
+        $consent = $subject['consent'];
+        /** @var array<int,array<string,mixed>> $items */
+        $items = $consent['items'];
+        $items[0]['purpose'] = 'HACKED';
+        $consent['items'] = $items;
+        $subject['consent'] = $consent;
+        $receipt['credentialSubject'] = $subject;
+
+        $result = Agreely::verifyReceipt($receipt, ['resolver' => $resolver]);
+        $this->assertSame('company_documented', $result->receiptType);
+        $this->assertSame('fail', $result->companySignature);
+        $this->assertSame('fail', $result->cellLabelBinding);
+        $this->assertSame('failed', $result->overall);
+    }
+
+    public function testAVerbalReceiptIsRecognisedByItsAssuranceLevelAlone(): void
+    {
+        [$receipt, $resolver] = self::verbalReceipt();
+        $receipt['type'] = ['VerifiableCredential', 'ConsentReceipt'];
+        $result = Agreely::verifyReceipt($receipt, ['resolver' => $resolver]);
+        $this->assertSame('company_documented', $result->receiptType);
+        $this->assertSame('fail', $result->companySignature, 'the type is inside the signed body');
+        $this->assertNotSame('verified', $result->overall);
+    }
+
+    public function testAVerbalReceiptWithAnUnresolvableIssuerIsUnavailable(): void
+    {
+        [$receipt] = self::verbalReceipt();
+        $result = Agreely::verifyReceipt($receipt, ['resolver' => static fn (string $did): ?array => null]);
+        $this->assertSame('unavailable', $result->companySignature);
+        $this->assertSame('unavailable', $result->overall);
+    }
+
+    /**
+     * A VerbalConsentReceipt shaped exactly like the one the API builds
+     * (App\Models\Consent\Services\VerbalConsentReceipt), signed with a fresh key.
+     *
+     * @return array{0: array<string,mixed>, 1: callable(string): ?array<string,mixed>}
+     */
+    private static function verbalReceipt(): array
+    {
+        $did = 'did:web:app.agreely.ca:c:acme';
+        $vm = $did . '#kms-1';
+        $pair = sodium_crypto_sign_keypair();
+        $body = [
+            '@context' => ['https://www.w3.org/ns/credentials/v2', 'https://agreely.ca/credentials/consent/v1'],
+            'type' => ['VerifiableCredential', 'ConsentReceipt', 'VerbalConsentReceipt'],
+            'id' => 'urn:agreely:receipt:vc-test-1',
+            'issuer' => $did,
+            'assuranceLevel' => 'company_documented',
+            'validFrom' => '2026-09-29T14:05:00Z',
+            'validUntil' => '2027-09-30T03:59:59Z',
+            'credentialSubject' => [
+                'consent' => [
+                    'action' => 'grant',
+                    'channel' => 'telephone',
+                    'items' => [['itemId' => '0x01', 'category' => 'courriel', 'purpose' => 'infolettre']],
+                    'documentVersion' => 'docver-1',
+                    'document' => ['code' => 'marketing', 'name' => 'Marketing', 'version' => '1.0', 'effectiveDate' => '2026-01-01'],
+                    'grantedAt' => '2026-09-29T14:05:00Z',
+                    'declinedItems' => [['itemId' => '0x02', 'category' => 'courriel', 'purpose' => 'sondages']],
+                ],
+            ],
+            'evidence' => [
+                'type' => 'VerbalConsentDocumentedByOrganisation',
+                'scriptVersion' => 'script-2026.09',
+                'documentVersion' => 'docver-1',
+            ],
+        ];
+        $signature = sodium_crypto_sign_detached(
+            (new Canonicalizer())->encode($body),
+            sodium_crypto_sign_secretkey($pair),
+        );
+        $body['proof'] = [[
+            'type' => 'DataIntegrityProof',
+            'cryptosuite' => 'eddsa-jcs-2022',
+            'created' => '2026-09-29T14:07:12Z',
+            'verificationMethod' => $vm,
+            'proofPurpose' => 'assertionMethod',
+            'proofValue' => 'z' . self::base58($signature),
+        ]];
+        $doc = [
+            'id' => $did,
+            'verificationMethod' => [[
+                'id' => $vm,
+                'type' => 'Multikey',
+                'controller' => $did,
+                'publicKeyMultibase' => 'z' . self::base58("\xed\x01" . sodium_crypto_sign_publickey($pair)),
+            ]],
+        ];
+        $resolver = static fn (string $asked): ?array => $asked === $did ? $doc : null;
+        return [$body, $resolver];
+    }
+
+    private static function base58(string $bytes): string
+    {
+        $alphabet = '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz';
+        $digits = [0];
+        foreach (str_split($bytes) as $char) {
+            $carry = ord($char);
+            foreach ($digits as $i => $digit) {
+                $carry += $digit << 8;
+                $digits[$i] = $carry % 58;
+                $carry = intdiv($carry, 58);
+            }
+            while ($carry > 0) {
+                $digits[] = $carry % 58;
+                $carry = intdiv($carry, 58);
+            }
+        }
+        $out = '';
+        foreach (str_split($bytes) as $char) {
+            if ($char !== "\x00") {
+                break;
+            }
+            $out .= '1';
+        }
+        foreach (array_reverse($digits) as $digit) {
+            $out .= $alphabet[$digit];
+        }
+        return $out;
+    }
 }

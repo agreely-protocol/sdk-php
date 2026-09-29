@@ -7,6 +7,9 @@ namespace Agreely\Sdk\Types;
 /**
  * A consent request record as returned by list/get. Keyed on the protocol
  * requestId (0x-prefixed 64-hex), NOT an internal uuid.
+ *
+ * `status` is the EFFECTIVE status ({@see ConsentRequestStatus}): an answer that
+ * declined every consent ask reads "asks_declined", never "approved".
  */
 final class ConsentRequestRecord
 {

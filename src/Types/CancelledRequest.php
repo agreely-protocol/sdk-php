@@ -8,7 +8,8 @@ namespace Agreely\Sdk\Types;
  * The 200 body from POST /v1/consent-requests/{id}/cancel. `cancelled` is true
  * only when THIS call flipped a pending request to revoked_before_action; false
  * on an idempotent no-op against an already-terminal request (not an error).
- * `status` is the request's status AFTER the call.
+ * `status` is the request's status AFTER the call ({@see ConsentRequestStatus},
+ * "asks_declined" included).
  */
 final class CancelledRequest
 {

@@ -182,27 +182,32 @@ final class LimitsAndBasisTest extends TestCase
     }
 
     /**
-     * The sensitive fail-closed status (shipped 2026-07-28) must survive decode and must
-     * DENY. It was absent from the SDK vocabulary entirely.
+     * "sensitive_requires_consent" is no longer emitted (2026-09-28): a sensitive cell on
+     * a non-consent basis with no record answers allow / necessity + basis like any other.
      */
-    public function testSensitiveRequiresConsentDecodesAndDenies(): void
+    public function testSensitiveCellOnANonConsentBasisAllowsOnNecessity(): void
     {
         $http = new MockHttpClient([
             MockHttpClient::json(200, [
-                'decision'  => 'deny',
-                'status'    => 'sensitive_requires_consent',
-                'checkedAt' => '2026-08-22T17:04:57Z',
+                'decision'  => 'allow',
+                'status'    => 'necessity',
+                'basis'     => 'legal_obligation',
+                'checkedAt' => '2026-09-29T17:04:57Z',
             ]),
         ]);
-        $result = $this->client($http)->checkDetailed('c1', 'Renseignements medicaux', 'Evaluation des reclamations');
+        $result = $this->client($http)->checkDetailed('c1', 'Renseignements medicaux', 'Obligation fiscale');
 
-        $this->assertFalse($result->isAllow());
-        $this->assertSame(CheckStatus::SENSITIVE_REQUIRES_CONSENT, $result->status);
-        $this->assertFalse($result->isNecessity());
+        $this->assertTrue($result->isAllow());
+        $this->assertTrue($result->isNecessity());
+        $this->assertSame(CheckBasis::LEGAL_OBLIGATION, $result->basis);
+        $this->assertNull($result->consentRef);
+        $this->assertNull($result->assurance);
+        $this->assertNull($result->tier);
+        $this->assertNotContains('sensitive_requires_consent', CheckStatus::ALL);
     }
 
     /**
-     * The status vocabulary must match openapi.yaml exactly: eight values, and the two
+     * The status vocabulary must match openapi.yaml exactly: nine values, and the two
      * that allow are exactly "active" and "necessity".
      */
     public function testStatusVocabularyMatchesTheSpec(): void
@@ -215,7 +220,8 @@ final class LimitsAndBasisTest extends TestCase
             'expired',
             'erased',
             'relationship_ended',
-            'sensitive_requires_consent',
+            'requires_depersonalization',
+            'basis_not_in_regime',
         ], CheckStatus::ALL);
         $this->assertSame(['active', 'necessity'], CheckStatus::ALLOWING);
         $this->assertSame([
@@ -224,6 +230,14 @@ final class LimitsAndBasisTest extends TestCase
             'security_fraud',
             'legal_obligation',
             'professional_contact',
+            'attributions',
+            'programme',
+            'entente_collecte',
+            'compatible_use',
+            'manifest_benefit',
+            'law_application',
+            'public_character',
         ], CheckBasis::ALL);
+        $this->assertSame(CheckBasis::ALL, array_merge(CheckBasis::PRIVATE, CheckBasis::PUBLIC));
     }
 }

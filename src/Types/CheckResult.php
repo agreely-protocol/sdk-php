@@ -10,7 +10,7 @@ namespace Agreely\Sdk\Types;
  *
  *   decision  -> "allow" | "deny" (ALLOW is the only true)
  *   status    -> the resolved cell state; see {@see CheckStatus} for the full
- *                eight-value vocabulary and what each one means
+ *                vocabulary and what each one means
  *   consentRef -> 0x-hex enforcement handle; present for every status BACKED BY A
  *                RECORD. Null for "none" (no record) and for "necessity" (the allow
  *                rests on the declared catalog basis, not on a signed consent)
@@ -21,9 +21,14 @@ namespace Agreely\Sdk\Types;
  *   degraded  -> true ONLY when synthesized by the local degrade policy on an
  *                outage (never set on a real server decision)
  *   mode      -> the degrade mode that produced a degraded allow ("fail-open")
- *   assurance -> how the enforcement record was established
- *                ("citizen_signed" | "company_attested"); present whenever a
- *                record exists, null for "none"/"necessity" and on a degraded result
+ *   assurance -> the proof behind the consent ({@see Assurance}:
+ *                "citizen_signed" | "company_attested" | "company_documented");
+ *                null for "none"/"necessity", for an acknowledged informed line
+ *                (active or withdrawn: it is no consent at any tier) and on a
+ *                degraded result. Treat an unknown value as NOT acceptable
+ *   tier      -> the same proof under its stored name ({@see ConsentTier}:
+ *                "full" | "manual" | "verbal"); present exactly when `assurance` is.
+ *                The HOST decides what each tier may unlock
  */
 final class CheckResult
 {
@@ -36,6 +41,7 @@ final class CheckResult
         public readonly ?string $mode = null,
         public readonly ?string $assurance = null,
         public readonly ?string $basis = null,
+        public readonly ?string $tier = null,
     ) {
     }
 
@@ -49,6 +55,7 @@ final class CheckResult
             Wire::str($wire['checkedAt'] ?? null),
             assurance: Wire::nullableStr($wire['assurance'] ?? null),
             basis: Wire::nullableStr($wire['basis'] ?? null),
+            tier: Wire::nullableStr($wire['tier'] ?? null),
         );
     }
 

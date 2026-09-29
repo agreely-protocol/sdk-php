@@ -5,10 +5,12 @@ declare(strict_types=1);
 namespace Agreely\Sdk\Test\Unit;
 
 use Agreely\Sdk\Agreely;
+use Agreely\Sdk\Errors\AgreelyConfigError;
 use Agreely\Sdk\Errors\AgreelyRateLimitError;
 use Agreely\Sdk\Errors\AgreelyTimeoutError;
 use Agreely\Sdk\Http\RawResponse;
 use Agreely\Sdk\Test\Support\MockHttpClient;
+use Agreely\Sdk\Types\ConsentRequestStatus;
 use PHPUnit\Framework\TestCase;
 
 /** iterate/collect auto-pagination, waitForSettlement, and rate-limit surfacing. */
@@ -121,5 +123,50 @@ final class ConsentRequestsExtraTest extends TestCase
         $rec = $this->client($http, ['maxRetries' => 2])->consentRequests()->get('0xr');
         $this->assertSame('approved', $rec->status);
         $this->assertCount(2, $http->calls);
+    }
+
+    public function testWaitForSettlementTreatsAsksDeclinedAsTerminal(): void
+    {
+        $http = new MockHttpClient([
+            MockHttpClient::json(200, $this->rec('0xr', 'pending')),
+            MockHttpClient::json(200, $this->rec('0xr', 'asks_declined')),
+        ]);
+        $settled = $this->client($http)->consentRequests()->waitForSettlement('0xr', ['intervalMs' => 1, 'timeoutMs' => 1000]);
+        $this->assertSame(ConsentRequestStatus::ASKS_DECLINED, $settled->status);
+        $this->assertCount(2, $http->calls);
+    }
+
+    public function testListSendsTheAsksDeclinedFilter(): void
+    {
+        $http = new MockHttpClient([
+            MockHttpClient::json(200, ['requests' => [$this->rec('0xr', 'asks_declined')], 'nextCursor' => null]),
+        ]);
+        $page = $this->client($http)->consentRequests()->list(['status' => ConsentRequestStatus::ASKS_DECLINED]);
+        $this->assertStringContainsString('status=asks_declined', $http->calls[0]->url);
+        $this->assertSame('asks_declined', $page->items[0]->status);
+    }
+
+    public function testListRefusesAFilterSentAsAList(): void
+    {
+        $http = new MockHttpClient([MockHttpClient::json(200, ['requests' => [], 'nextCursor' => null])]);
+        foreach (['status', 'customerId', 'cursor'] as $name) {
+            try {
+                /** @phpstan-ignore argument.type (the wrong shape on purpose) */
+                $this->client($http)->consentRequests()->list([$name => ['approved']]);
+                $this->fail("expected AgreelyConfigError for {$name}");
+            } catch (AgreelyConfigError $e) {
+                $this->assertStringContainsString($name, $e->getMessage());
+            }
+        }
+        $this->assertCount(0, $http->calls);
+    }
+
+    public function testStatusVocabularyMatchesTheSpec(): void
+    {
+        $this->assertSame(
+            ['pending', 'approved', 'asks_declined', 'refused', 'expired', 'revoked_before_action'],
+            ConsentRequestStatus::ALL,
+        );
+        $this->assertNotContains('pending', ConsentRequestStatus::TERMINAL);
     }
 }

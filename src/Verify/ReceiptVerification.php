@@ -13,7 +13,8 @@ namespace Agreely\Sdk\Verify;
  * Statuses are strings: 'pass' | 'fail' | 'unavailable' | 'skipped' | 'unsupported'
  * ('unavailable' = the DID could not be resolved, so the check could not complete —
  * distinct from 'fail', a real signature mismatch). overall: 'verified' | 'partial'
- * | 'failed' | 'unavailable'. receiptType: 'company_attested' | 'citizen'.
+ * | 'failed' | 'unavailable'. receiptType: 'company_attested' | 'company_documented'
+ * (a verbal, telephone receipt: at most 'partial') | 'citizen'.
  */
 final class ReceiptVerification
 {

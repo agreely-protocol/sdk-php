@@ -23,7 +23,11 @@ use Throwable;
  * check is reported "unavailable" (inconclusive) — never "fail" (a real tamper).
  *
  * A company-attested receipt is fully offline-sound (Ed25519 over the JCS body). A
- * citizen receipt is HONESTLY PARTIAL offline: the company half signed the original
+ * VERBAL receipt (type VerbalConsentReceipt, assuranceLevel company_documented) is
+ * reported as receiptType "company_documented": its company signature is checked the
+ * same way, but its overall verdict is at most "partial", because what the signature
+ * proves is only that the ORGANISATION documented a telephone consent; there is no
+ * signed paper and no citizen signature. A citizen receipt is HONESTLY PARTIAL offline: the company half signed the original
  * OFFER, which the receipt omits for unlinkability, and NO server endpoint re-checks
  * it. The company half travels only in the separate self-contained verification
  * bundle Agreely issues with the receipt (signed offer + DID documents + Merkle
@@ -107,9 +111,13 @@ final class ReceiptVerifier
         $notes = [];
 
         if ($type === 'company_attested') {
-            $companySignature = $this->verifyCompanySignature($r, $notes);
+            $companySignature = $this->verifyCompanySignature($r, $notes, $type);
             $citizenAssertion = 'unsupported';
             $notes[] = 'A company-attested receipt carries no citizen passkey assertion, so citizenAssertion is not applicable.';
+        } elseif ($type === 'company_documented') {
+            $companySignature = $this->verifyCompanySignature($r, $notes, $type);
+            $citizenAssertion = 'unsupported';
+            $notes[] = 'A verbal (telephone) receipt carries no citizen signature, so citizenAssertion is not applicable.';
         } else {
             $companySignature = 'unsupported';
             $notes[] = 'Company signature is UNSUPPORTED offline on a citizen receipt: the company signed the original offer '
@@ -146,7 +154,7 @@ final class ReceiptVerifier
     /**
      * Is the human-readable cell label (category/purpose) cryptographically bound?
      *
-     * company_attested: the labels sit INSIDE the Ed25519-signed body, so this
+     * company_attested and company_documented: the labels sit INSIDE the Ed25519-signed body, so this
      *   tracks companySignature — a mutation to any item's category/purpose/itemId
      *   breaks the signature (a genuine offline cross-check of the labels).
      * citizen: UNSUPPORTED offline. The receipt deliberately omits the salted
@@ -159,7 +167,7 @@ final class ReceiptVerifier
      */
     private static function assessCellLabelBinding(string $type, string $companySignature, array &$notes): string
     {
-        if ($type !== 'company_attested') {
+        if ($type !== 'company_attested' && $type !== 'company_documented') {
             $notes[] = 'Cell labels UNSUPPORTED offline: a citizen receipt omits the salted commitment and Merkle root that bind the '
                 . 'category/purpose labels (unlinkability / crypto-shredding), so a mutated label cannot be detected offline. '
                 . 'Do NOT trust the displayed labels on this offline result alone. No server endpoint re-checks them: the labels '
@@ -186,7 +194,7 @@ final class ReceiptVerifier
      * @param array<array-key,mixed> $r
      * @param list<string> $notes
      */
-    private function verifyCompanySignature(array $r, array &$notes): string
+    private function verifyCompanySignature(array $r, array &$notes, string $type): string
     {
         $issuer = self::asString($r['issuer'] ?? null);
         $proofs = self::asArray($r['proof'] ?? null);
@@ -218,8 +226,14 @@ final class ReceiptVerifier
         }
 
         if (Signature::verifyEd25519($key, $canonical, $signature)) {
-            $pdfHash = self::asString(self::asObject($r['evidence'] ?? null)['pdfHash'] ?? null);
             $notes[] = "Company signature verified against issuer DID {$issuer} (key {$vm}).";
+            if ($type === 'company_documented') {
+                $script = self::asString(self::asObject($r['evidence'] ?? null)['scriptVersion'] ?? null);
+                $notes[] = "This proves the ORGANISATION documented a telephone consent under script version {$script}; it does "
+                    . 'NOT prove the call happened, and there is no signed paper.';
+                return 'pass';
+            }
+            $pdfHash = self::asString(self::asObject($r['evidence'] ?? null)['pdfHash'] ?? null);
             $notes[] = "This proves the company ATTESTED to a hand-signed PDF (hash {$pdfHash}); it does NOT prove a human signed.";
             return 'pass';
         }
@@ -506,6 +520,12 @@ final class ReceiptVerifier
     private static function receiptType(array $r): string
     {
         $types = self::asArray($r['type'] ?? null);
+        // Checked FIRST: a verbal receipt must never be read as a paper one nor as a citizen one.
+        $verbal = in_array('VerbalConsentReceipt', $types, true)
+            || self::asString($r['assuranceLevel'] ?? null) === 'company_documented';
+        if ($verbal) {
+            return 'company_documented';
+        }
         foreach ($types as $t) {
             if ($t === 'CompanyAttestedConsentReceipt') {
                 return 'company_attested';
@@ -585,6 +605,16 @@ final class ReceiptVerifier
                 return 'unavailable';
             }
             return 'verified';
+        }
+        if ($type === 'company_documented') {
+            if ($company === 'fail' || $disclosure === 'fail' || $anchor === 'fail') {
+                return 'failed';
+            }
+            if ($company === 'unavailable') {
+                return 'unavailable';
+            }
+            // Never 'verified': the signature proves the organisation's own statement only.
+            return 'partial';
         }
         if ($citizen === 'fail' || $disclosure === 'fail' || $anchor === 'fail') {
             return 'failed';

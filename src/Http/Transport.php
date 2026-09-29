@@ -13,6 +13,7 @@ use Agreely\Sdk\Errors\AgreelyRateLimitError;
 use Agreely\Sdk\Errors\AgreelySweepTooFrequentError;
 use Agreely\Sdk\Errors\AgreelyUnavailableError;
 use Agreely\Sdk\Errors\AgreelyValidationError;
+use Agreely\Sdk\Errors\AgreelyVerbalDailyCapError;
 
 /**
  * The thin HTTP layer, ported from the TS transport.ts: build the request,
@@ -44,7 +45,8 @@ final class Transport
      * AgreelySweepTooFrequentError is NEVER auto-retried, whatever the call and
      * whatever maxRetries says: the pass being declared is already represented by
      * the one declared less than 15 minutes ago, so waiting out the floor and
-     * sending it again records a second pass for the same run.
+     * sending it again records a second pass for the same run. Neither is
+     * AgreelyVerbalDailyCapError: a daily cap does not lift in seconds.
      *
      * @return array<string,mixed> the decoded JSON object
      */
@@ -55,7 +57,7 @@ final class Transport
         while (true) {
             try {
                 return $this->attempt($spec);
-            } catch (AgreelySweepTooFrequentError $error) {
+            } catch (AgreelySweepTooFrequentError | AgreelyVerbalDailyCapError $error) {
                 throw $error;
             } catch (AgreelyRateLimitError $error) {
                 if ($rateAttempt >= $rateRetries) {
@@ -178,8 +180,9 @@ final class Transport
             case 404:
                 throw new AgreelyNotFoundError($message, $code ?? 'not_found', $res->status);
             case 409:
-                // A concurrent retry of one declaration could not be settled. Nothing was
-                // recorded under this attempt: retry with the SAME Idempotency-Key.
+                // `retry`: a concurrent retry of one declaration could not be settled, retry
+                // with the SAME Idempotency-Key. `conflict`: the request contradicts the
+                // record's state (a covered purpose, an ended relationship...), no retry helps.
                 throw new AgreelyConflictError($message, $code ?? 'retry', 409);
             case 413:
                 // An over-large declaration body. A VALIDATION failure, not an outage: the
@@ -192,6 +195,10 @@ final class Transport
                 if ($code === 'sweep_too_frequent') {
                     // The per-(rule, hostSystem) 15-minute floor, not the company window.
                     throw new AgreelySweepTooFrequentError($message, $code, 429, $retryAfter);
+                }
+                if ($code === 'verbal_daily_cap') {
+                    // The organisation's daily limit of verbal consents, not the minute window.
+                    throw new AgreelyVerbalDailyCapError($message, $code, 429, $retryAfter);
                 }
                 throw new AgreelyRateLimitError($message, 'rate_limited', $res->status, $retryAfter);
             case 402:

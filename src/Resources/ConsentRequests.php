@@ -12,6 +12,7 @@ use Agreely\Sdk\Http\Transport;
 use Agreely\Sdk\Types\CancelledRequest;
 use Agreely\Sdk\Types\ConsentRequestPage;
 use Agreely\Sdk\Types\ConsentRequestRecord;
+use Agreely\Sdk\Types\ConsentRequestStatus;
 use Agreely\Sdk\Types\IssuedRequest;
 use Generator;
 
@@ -21,8 +22,8 @@ use Generator;
  */
 final class ConsentRequests
 {
-    /** The terminal (settled) consent-request statuses. */
-    private const TERMINAL_STATUSES = ['approved', 'refused', 'expired', 'revoked_before_action'];
+    /** The terminal (settled) consent-request statuses, asks_declined included. */
+    private const TERMINAL_STATUSES = ConsentRequestStatus::TERMINAL;
 
     /** Default guard so an unbounded list can never spin forever. */
     private const DEFAULT_MAX_PAGES = 1000;
@@ -39,6 +40,11 @@ final class ConsentRequests
      * auto-generated per call (override via $options['idempotencyKey']) so a
      * caller-driven retry replays the original 201 byte-for-byte rather than
      * double-issuing.
+     *
+     * validUntil: a plain date (YYYY-MM-DD) means through the END of that calendar
+     * day in the tenant's timezone; an instant must be RFC 3339 WITH an offset. A
+     * relative phrase ("+1 year") is refused (422), and so is an end more than ten
+     * years after the start (an Agreely product rule, not a statutory limit).
      *
      * @param array{customerId:string,recipientEmail:string,consentDocumentId?:string,documentCode?:string,validUntil:string} $input
      * @param array{idempotencyKey?:string} $options
@@ -89,7 +95,8 @@ final class ConsentRequests
 
     /**
      * List the company's requests, newest first (keyset). All filters optional:
-     * 'customerId' (the company's own subject ref), 'status', 'limit' (page size;
+     * 'customerId' (the company's own subject ref), 'status' (a
+     * {@see ConsentRequestStatus} value; 'approved' EXCLUDES asks_declined), 'limit' (page size;
      * server default 50, max 100), and 'cursor' (a requestId from a prior
      * nextCursor). Returns metadata only, tenant-scoped by the API key. The page
      * maps the wire `requests` field to `items`.
@@ -98,6 +105,13 @@ final class ConsentRequests
      */
     public function list(array $input = []): ConsentRequestPage
     {
+        // The server answers 400 to a filter or cursor sent as a list (?status[]=x): refuse
+        // it here, where the mistake is, rather than as a remote error.
+        foreach (['customerId', 'status', 'cursor'] as $name) {
+            if (isset($input[$name]) && !is_string($input[$name])) {
+                throw new AgreelyConfigError("consentRequests.list: \"{$name}\" must be a single string, not a list.");
+            }
+        }
         $limit = isset($input['limit']) && is_int($input['limit']) ? (string) $input['limit'] : null;
         $wire = $this->transport->request(new RequestSpec(
             method: 'GET',
@@ -225,7 +239,7 @@ final class ConsentRequests
 
     /**
      * Poll GET /v1/consent-requests/{id} until it reaches a terminal state
-     * (approved | refused | expired | revoked_before_action), or throw
+     * (approved | asks_declined | refused | expired | revoked_before_action), or throw
      * AgreelyTimeoutError when the budget elapses. Honors Retry-After on a 429.
      *
      * @param array{intervalMs?:int,timeoutMs?:int} $opts

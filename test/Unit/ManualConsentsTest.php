@@ -5,7 +5,11 @@ declare(strict_types=1);
 namespace Agreely\Sdk\Test\Unit;
 
 use Agreely\Sdk\Agreely;
+use Agreely\Sdk\Errors\AgreelyConfigError;
+use Agreely\Sdk\Errors\AgreelyConflictError;
+use Agreely\Sdk\Errors\AgreelyNotFoundError;
 use Agreely\Sdk\Test\Support\MockHttpClient;
+use Agreely\Sdk\Types\AcknowledgedLine;
 use Agreely\Sdk\Types\ClaimLink;
 use Agreely\Sdk\Types\ManualConsentErasure;
 use Agreely\Sdk\Types\ManualConsentResult;
@@ -183,5 +187,97 @@ final class ManualConsentsTest extends TestCase
         ]);
         $r = $this->client($http)->checkDetailed('c1', 'Email', 'News');
         $this->assertNull($r->assurance);
+    }
+
+    public function testRecordReportsTheAcknowledgedLinesAndAsksDeclined(): void
+    {
+        $ack = '0x' . str_repeat('b', 64);
+        $http = new MockHttpClient([
+            MockHttpClient::json(201, [
+                'consentId' => 'mc_1', 'merkleRoot' => '0x' . str_repeat('1', 64), 'consentRefs' => [$ack],
+                'assurance' => 'company_attested', 'anchored' => false,
+                'acknowledged' => [['category' => 'Coordonnees', 'purpose' => 'Gestion du dossier', 'consentRef' => $ack]],
+                'asksDeclined' => true,
+            ]),
+        ]);
+        $input = $this->input();
+        $input['items'] = [];
+        $r = $this->client($http)->manualConsents()->record($input);
+        $this->assertTrue($r->asksDeclined);
+        $this->assertCount(1, $r->acknowledged);
+        $this->assertInstanceOf(AcknowledgedLine::class, $r->acknowledged[0]);
+        $this->assertSame($ack, $r->acknowledged[0]->consentRef);
+        $body = $http->calls[0]->body;
+        $this->assertNotNull($body);
+        $this->assertSame([], $body['items'], 'an empty items list is sent, not dropped');
+    }
+
+    public function testRecordRefusesAMalformedIdempotencyKeyBeforeTheCall(): void
+    {
+        foreach (['', 'has space', "tab\there", str_repeat('k', 256), 'caf' . "\u{e9}"] as $bad) {
+            $http = self::recorded();
+            try {
+                $this->client($http)->manualConsents()->record($this->input(), ['idempotencyKey' => $bad]);
+                $this->fail('expected AgreelyConfigError for ' . json_encode($bad));
+            } catch (AgreelyConfigError $e) {
+                $this->assertStringContainsString('printable ASCII', $e->getMessage());
+            }
+            $this->assertCount(0, $http->calls);
+        }
+        $http = self::recorded();
+        $this->client($http)->manualConsents()->record($this->input(), ['idempotencyKey' => str_repeat('k', 255)]);
+        $this->assertSame(str_repeat('k', 255), $http->calls[0]->header('Idempotency-Key'));
+    }
+
+    public function testAStateConflictIsDistinguishableFromARetry(): void
+    {
+        $http = new MockHttpClient([
+            MockHttpClient::json(409, ['error' => ['code' => 'conflict', 'message' => 'A verbal consent awaits its paper.']]),
+        ]);
+        try {
+            $this->client($http)->manualConsents()->record($this->input());
+            $this->fail('expected AgreelyConflictError');
+        } catch (AgreelyConflictError $e) {
+            $this->assertSame('conflict', $e->code);
+            $this->assertTrue($e->isStateConflict());
+            $this->assertFalse($e->isRetryable());
+        }
+        $this->assertCount(1, $http->calls, 'never retried');
+    }
+
+    public function testClaimLinkForAnUnknownCustomerIsNotFound(): void
+    {
+        $http = new MockHttpClient([
+            MockHttpClient::json(404, ['error' => ['code' => 'not_found', 'message' => 'No customer with that reference.']]),
+        ]);
+        $this->expectException(AgreelyNotFoundError::class);
+        $this->client($http)->manualConsents()->createClaimLink(['customerId' => 'nobody']);
+    }
+
+    public function testClaimLinkForAnEndedRelationshipIsAConflict(): void
+    {
+        $http = new MockHttpClient([
+            MockHttpClient::json(409, ['error' => ['code' => 'conflict', 'message' => 'The relationship has ended.']]),
+        ]);
+        try {
+            $this->client($http)->manualConsents()->createClaimLink(['customerId' => 'cust']);
+            $this->fail('expected AgreelyConflictError');
+        } catch (AgreelyConflictError $e) {
+            $this->assertTrue($e->isStateConflict());
+        }
+    }
+
+    public function testRevokeReportsWhatTheGateDoesNow(): void
+    {
+        foreach (['denied', 'superseded', 'unchanged'] as $gate) {
+            $http = new MockHttpClient([
+                MockHttpClient::json(200, [
+                    'consentRef' => self::REF, 'revoked' => true, 'alreadyRevoked' => $gate === 'unchanged', 'gate' => $gate,
+                ]),
+            ]);
+            $r = $this->client($http)->manualConsents()->revoke(self::REF);
+            $this->assertSame($gate, $r->gate);
+            $this->assertSame($gate === ManualConsentRevocation::GATE_DENIED, $r->gateDenied());
+        }
     }
 }

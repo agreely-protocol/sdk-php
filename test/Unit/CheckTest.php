@@ -7,7 +7,9 @@ namespace Agreely\Sdk\Test\Unit;
 use Agreely\Sdk\Agreely;
 use Agreely\Sdk\Errors\AgreelyConfigError;
 use Agreely\Sdk\Test\Support\MockHttpClient;
+use Agreely\Sdk\Types\Assurance;
 use Agreely\Sdk\Types\CheckResult;
+use Agreely\Sdk\Types\ConsentTier;
 use PHPUnit\Framework\TestCase;
 
 final class CheckTest extends TestCase
@@ -99,5 +101,54 @@ final class CheckTest extends TestCase
     {
         $this->expectException(AgreelyConfigError::class);
         new Agreely(['apiKey' => '  ']);
+    }
+
+    public function testCheckCarriesTheVerbalTierAndCompanyDocumentedAssurance(): void
+    {
+        $http = new MockHttpClient([
+            MockHttpClient::json(200, [
+                'decision' => 'allow', 'status' => 'active', 'consentRef' => '0xabc',
+                'assurance' => 'company_documented', 'tier' => 'verbal', 'checkedAt' => '2026-09-29T00:00:00Z',
+            ]),
+        ]);
+        $r = $this->client($http)->checkDetailed('cust', 'Phone number', 'Billing');
+        $this->assertSame(Assurance::COMPANY_DOCUMENTED, $r->assurance);
+        $this->assertSame(ConsentTier::VERBAL, $r->tier);
+        $this->assertTrue(ConsentTier::atLeast($r->tier, ConsentTier::VERBAL));
+        $this->assertFalse(ConsentTier::atLeast($r->tier, ConsentTier::MANUAL));
+    }
+
+    public function testAWithdrawnInformedLineDeniesRevokedWithARefButNoAssuranceOrTier(): void
+    {
+        $http = new MockHttpClient([
+            MockHttpClient::json(200, [
+                'decision' => 'deny', 'status' => 'revoked', 'consentRef' => '0xabc', 'checkedAt' => '2026-09-29T00:00:00Z',
+            ]),
+        ]);
+        $r = $this->client($http)->checkDetailed('cust', 'Phone number', 'Billing');
+        $this->assertSame('0xabc', $r->consentRef);
+        $this->assertNull($r->assurance);
+        $this->assertNull($r->tier);
+    }
+
+    public function testBatchDecisionCarriesTier(): void
+    {
+        $http = new MockHttpClient([
+            MockHttpClient::json(200, ['decisions' => [[
+                'customerRef' => 'c1', 'category' => 'Email', 'purpose' => 'News', 'decision' => 'allow',
+                'status' => 'active', 'consentRef' => '0xabc', 'assurance' => 'company_attested', 'tier' => 'manual',
+                'checkedAt' => '2026-09-29T00:00:00Z',
+            ]]]),
+        ]);
+        $d = $this->client($http)->checkBatch([['customerRef' => 'c1', 'category' => 'Email', 'purpose' => 'News']]);
+        $this->assertSame(ConsentTier::MANUAL, $d[0]->tier);
+    }
+
+    public function testAnUnknownTierIsNeverAcceptable(): void
+    {
+        $this->assertFalse(ConsentTier::atLeast('platinum', ConsentTier::VERBAL));
+        $this->assertFalse(ConsentTier::atLeast(null, ConsentTier::VERBAL));
+        $this->assertTrue(ConsentTier::atLeast(ConsentTier::FULL, ConsentTier::MANUAL));
+        $this->assertSame(['citizen_signed', 'company_attested', 'company_documented'], Assurance::ALL);
     }
 }
