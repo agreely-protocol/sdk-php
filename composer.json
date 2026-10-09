@@ -33,7 +33,7 @@
         "test": "phpunit --testsuite=unit",
         "test:unit": "phpunit --testsuite=unit",
         "test:contract": "phpunit --testsuite=contract",
-        "stan": "phpstan analyse"
+        "stan": "phpstan analyse --memory-limit=1G"
     },
     "config": {
         "sort-packages": true
