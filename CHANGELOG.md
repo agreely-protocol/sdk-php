@@ -8,7 +8,9 @@ tag as the released version.
 
 Covers the whole production /v1 API as deployed on 2026-10-09. Every route the API
 tier serves now has a method, and the TypeScript twin `@agreely/sdk` 0.5.0 exposes the
-same surface under the same names.
+same surface under the same method and type names. A result that extends a record in
+TypeScript extends it here too, so its fields sit directly on it (`$placed->id`,
+`$declared->agreelyIdentity`).
 
 ### Breaking
 
@@ -19,8 +21,17 @@ same surface under the same names.
   must fail loudly, not reach the server as "not attested".
 - **A 429 keeps the code it was sent with, and only `rate_limited` is ever
   auto-retried.** Before, any 429 this client did not know read `rate_limited` and could
-  be retried on a read with `maxRetries` set. Every other 429 is a cap that waiting
-  seconds does not lift.
+  be retried on a read with `maxRetries` set. The rule, the same in both SDKs: a known
+  daily-cap code, or any 429 whose reason is `daily_cap`, raises `AgreelyDailyCapError`;
+  `sweep_too_frequent` raises `AgreelySweepTooFrequentError`; any other code raises the
+  base `AgreelyRateLimitError` keeping its code; none of them is retried.
+- **Closed vocabularies gained values.** `Scope::ALL` adds `withdraw` and `holds`
+  (`Scope::WITHDRAW`, `Scope::HOLDS`): code switching on it exhaustively must handle
+  them.
+- **`AgreelyUnavailableError` keeps the envelope's `code`.** A 5xx, or a status mapped
+  to no other error (405, 410, an unfollowed 3xx), now carries the `code`, `field` and
+  `reason` the server sent instead of the fixed `unavailable`; the class raised is
+  unchanged.
 
 ### Added
 
@@ -29,7 +40,8 @@ same surface under the same names.
   withdrawal routes; compare it, never the message. `ErrorReason` names the known
   values, `ErrorCode` the known codes (the registry, holds, dispositions and inventory
   carry their stable string in `code`), and `$e->hasReason()` compares one. An unknown
-  future reason is readable as a plain string and never throws.
+  future reason is readable as a plain string and never throws. `ErrorCode::DAILY_CAPS`
+  lists the 24-hour cap codes.
 - **`AgreelyDailyCapError`**, the rolling 24-hour caps, never auto-retried: the
   withdrawal cap (`withdrawal_daily_cap`, reason `daily_cap`), the hold caps
   (`hold_budget_exhausted`, `hold_release_cap_reached`), and `AgreelyVerbalDailyCapError`,
@@ -39,10 +51,12 @@ same surface under the same names.
   is no consent record (the keys are absent from the wire). `validUntil` is an upper
   bound, never a cache lease.
 - **`$agreely->consentDocuments()`**: `list()`, `get($code)` with the full published
-  information, and `getInformationPdf($documentVersionId, ['locale' => ..., 'timeout' => ...])`,
-  the information document as PDF bytes (`InformationDocument`).
-- **`$agreely->catalog()->forDocument($documentCode)`**: the active cells of one published
-  document with its current `documentVersionId` and the regime. `CatalogEntry` gains
+  information (`ConsentDocumentSummary`, `ConsentDocumentDetail`, `ConsentDocumentItem`,
+  `LocalizedText`, whose `text()` refuses a locale other than `fr` or `en`), and
+  `getInformationPdf($documentVersionId, ['locale' => ..., 'timeout' => ...])`, the
+  information document as PDF bytes (`InformationDocument`).
+- **`$agreely->catalog()->forDocument($documentCode)`**: a `DocumentCatalog` with the
+  regime, the `document` (`code`, `documentVersionId`) and its active cells in `catalog`. `CatalogEntry` gains
   `legalBasis` and `sensitive`, which the wire always carried.
 - **`manualConsents()->createConsentSheet($customerRef, ...)`**: the signature sheet of a
   published version for one customer, minted with its claim and returned once
@@ -52,18 +66,27 @@ same surface under the same names.
 - **`ManualConsentErasure::$gate`**: what /v1/check does after an erasure.
 - **`$agreely->withdrawals()->record($customerRef, $consentRef, ...)`** (scope
   `withdraw`): a person's withdrawal of any consent ask, recorded on her behalf
-  (`ConsentWithdrawal`, with `gate` and `alsoWithdrawn`). The one route that never
-  answers the billing 402.
-- **`$agreely->customers()`** (scope `registry`): `get()` and `upsert()`, the registry
-  identity as metadata. `upsert()` is a merge (absent untouched, null clears) and says
-  whether it `created` the record.
+  (`ConsentWithdrawal`, with `gate` and `alsoWithdrawn`; `WithdrawalChannel` names the
+  channels). The one route that never answers the billing 402.
+- **`$agreely->customers()`** (scope `registry`): `get()` (`CustomerRecord`) and
+  `upsert()`, the registry identity as metadata. `upsert()` is a merge (absent
+  untouched, null clears) and returns an `UpsertCustomerResult`, a `CustomerRecord` that
+  says whether it `created` the record. A customerRef with a "/" or a "%" travels as one
+  encoded segment; "." and ".." are refused before the call.
 - **Per-customer retention on `$agreely->retention()`** (scope `registry`):
   `getCustomerRetention()` (the derived clock, the standing disposition and the holds),
-  `declareDisposition()`, `placeHold()` and `releaseHold()`, with `agreelyIdentity` on
-  what a declaration or a release did to Agreely's own copy of the identity.
+  `declareDisposition()` (`DeclaredDisposition`, extending `RetentionDispositionRecord`),
+  `placeHold()` and `releaseHold()` (`PlacedHold` and `ReleasedHold`, extending
+  `RetentionHold`), with `agreelyIdentity` (`AgreelyIdentityOutcome`) on what a
+  declaration or a release did to Agreely's own copy of the identity. `DispositionKind`,
+  `HoldGround` and `RelationshipLifecycle` name the vocabularies. A misspelt option is
+  refused rather than silently generating a fresh Idempotency-Key.
 - **The holds feed on `$agreely->retention()`** (scope `holds`): `listHolds()` (one
-  page), `holdPages()` (a Generator of pages) and `syncHolds()`, one complete sync with
-  the cursor to persist, which throws rather than return a partial feed.
+  `RetentionHoldPage`), `holdPages()` (a Generator of pages) and `syncHolds()` (a
+  `HoldsSync`: the mode, every `RetentionHoldFeedItem` and the cursor to persist). Both
+  readers THROW rather than end on a partial feed: past `maxPages`, or on a last page
+  with no cursor. An empty `changedSince` is a snapshot. A hold whose status is unknown
+  or missing counts as in place (`isActive()` is false only on `released`).
 - **`Identity::$company`** (name, sector, statute, public policy url) and
   `Identity::hasScope()`. `Scope` adds `WITHDRAW` and `HOLDS`.
 - `RequestSpec::$timeoutMs`, a per-call budget. The two calls the server answers by
@@ -71,6 +94,11 @@ same surface under the same names.
 
 ### Changed
 
+- **The live contract suite covers the 0.5.0 surface** (`LiveSurfaceContractTest`): the
+  check dates, the consent documents and their PDF, the registry upsert, the consent
+  sheet latch, a withdrawal on behalf, and a hold placed, read through the feed and
+  released, every customer reference carrying a "/" and a "%41". The revoke step reads
+  the stack checkout from `AGREELY_APP_DIR`.
 - **`Inventory::MAX_SETS` is 200** (was 50), as the server now accepts. A company may
   introduce at most 1000 new set keys in any rolling 30 days (422 `new_set_limit`).
 

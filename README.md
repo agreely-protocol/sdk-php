@@ -250,8 +250,8 @@ $catalog = $agreely->catalog()->list();             // discovery for issuance
 
 // One published document's active cells, its current version and the regime, for one intake screen:
 $form = $agreely->catalog()->forDocument('conditions-marketing');
-$form->documentVersionId;   // what the consent writes take
-$form->entries[0]->legalBasis;
+$form->document['documentVersionId'];   // what the consent writes take
+$form->catalog[0]->legalBasis;
 ```
 
 **`approved` means a consent was obtained.** It means the person confirmed and, when
@@ -707,21 +707,31 @@ never the reason**. `holds` is never granted by default: a purge job's key carri
 `retention` **and** `holds`.
 
 ```php
-$sync = $agreely->retention()->syncHolds(['changedSince' => $storedCursor]); // null: a full snapshot
-foreach ($sync->holds as $hold) {
-    $heldSet->upsert($hold->id, $hold);       // at least once: upsert by id
+use Agreely\Sdk\Types\HoldsSync;
+
+$sync = $agreely->retention()->syncHolds(['changedSince' => $storedCursor]); // null or "": a full snapshot
+if ($sync->mode === HoldsSync::MODE_SNAPSHOT) {
+    $heldSet->replaceAll($sync->active());     // a snapshot REPLACES your whole active set
+} else {
+    foreach ($sync->holds as $hold) {         // a delta: placed AND released since, at least once
+        $hold->isActive() ? $heldSet->upsert($hold->id, $hold) : $heldSet->remove($hold->id);
+    }
 }
-// mode "snapshot" REPLACES your whole active set; "delta" lists what was placed or released since
 $store->put($sync->cursor);                   // the next sync's changedSince
 
-if ($hold->scope->covers($ruleKey, $cellKey)) { /* skip this record */ }
+if ($heldSet->covers($customerRef, $ruleKey, $cellKey)) { /* skip this record */ } // HoldScope::covers() per hold
 ```
 
 **Purge only after `syncHolds()` returns.** It reads every page (500 rows each) and
-collects them; any error (401, 403, 402, a 5xx, a timeout) **throws**, and a sync longer
-than `maxPages` (default 1000) throws rather than return a partial set. On any throw,
-purge nothing this run and store no cursor. `listHolds()` reads one page and
-`holdPages()` yields them one by one, for a job that streams.
+collects them; any error (401, 403, 402, a 5xx, a timeout) **throws**, and so does a
+sync that does not reach a last page carrying a cursor within `maxPages` (default 1000):
+it never returns a partial set. On any throw, purge nothing this run and store no
+cursor. A hold whose status the client does not recognise counts as **in place**.
+
+`listHolds()` reads one page; `holdPages()` yields the pages one by one for a job that
+streams the held set into its own store. It throws the same way, **after** the pages
+already yielded, so record what each page holds as you go but purge nothing until the
+loop has ended without a throw.
 
 ### One customer's retention (scope `registry`)
 
@@ -740,7 +750,7 @@ $hold = $agreely->retention()->placeHold('cust_8812', [
     'reviewOn'  => '2027-10-09',                     // a reminder only: nothing ever releases a hold on it
 ]);
 
-$released = $agreely->retention()->releaseHold('cust_8812', $hold->hold->id, [
+$released = $agreely->retention()->releaseHold('cust_8812', $hold->id, [
     'reason' => 'Recours épuisés.',                  // REQUIRED: lifting a hold is a motivated act
 ]);
 $released->agreelyIdentity;   // "erased" when this release removed Agreely's copy of the identity
@@ -749,7 +759,7 @@ $declared = $agreely->retention()->declareDisposition('cust_8812', [
     'disposition' => 'destroyed',                    // destroyed | anonymized | legal_hold
 ]);
 $declared->appended;                     // false: an identical standing declaration was replayed
-$declared->declaration->agreelyIdentity; // erased | none_held | retained_hold | retained
+$declared->agreelyIdentity;  // erased | none_held | retained_hold | retained
 $declared->warnings;                     // hold_active: recorded as received, never refused
 ```
 
@@ -780,10 +790,6 @@ $declared->warnings;                     // hold_active: recorded as received, n
 A host system declares the record sets it holds and the **names** of their fields,
 never a value. Agreely links each set to a catalogue cell and hands back the frozen
 retention statement you stamp on a record at collection.
-
-> **Source note.** `/v1/inventory/*` is not in the committed `openapi.yaml` as of
-> 2026-09-25; this resource is built from the shipped `InventoryController`. Treat a
-> divergence as a question for the API rather than something to work around.
 
 ```php
 $declared = $agreely->inventory()->replaceCategories([
@@ -845,12 +851,12 @@ an error**.
 | `AgreelyValidationError`    | 400 / 422 (`->field` names the input) |
 | `AgreelyNotFoundError`      | 404                                   |
 | `AgreelyBillingInactiveError` | 402 - the company's Agreely subscription lapsed |
-| `AgreelyRateLimitError`     | 429 (`->retryAfter` seconds)          |
+| `AgreelyRateLimitError`     | 429 (`->retryAfter` seconds). Code `rate_limited` is the per-minute window, the only 429 ever auto-retried; any other code it does not know is kept as sent and never retried |
 | `AgreelySweepTooFrequentError` | 429 `sweep_too_frequent` - the per-(rule, hostSystem) 15-minute floor, a subclass of the above. NEVER auto-retried |
-| `AgreelyDailyCapError`      | 429 on a rolling 24-hour cap, `->code` says which: `withdrawal_daily_cap` (reason `daily_cap`, no Retry-After), `hold_budget_exhausted`, `hold_release_cap_reached`. A subclass of the rate-limit error. NEVER auto-retried |
+| `AgreelyDailyCapError`      | 429 on a rolling 24-hour cap, `->code` says which: `withdrawal_daily_cap` (reason `daily_cap`, no Retry-After), `hold_budget_exhausted`, `hold_release_cap_reached`, and any 429 whose reason is `daily_cap`. A subclass of the rate-limit error. NEVER auto-retried |
 | `AgreelyVerbalDailyCapError` | 429 `verbal_daily_cap` - the organisation's daily limit of verbal consents, a subclass of `AgreelyDailyCapError` |
 | `AgreelyConflictError`      | 409. Code `retry` (`->isRetryable()`): a declaration lost a race, retry with the **same** Idempotency-Key. Code `conflict` (`->isStateConflict()`): the request contradicts the record's state, `->reason` says which; retrying changes nothing. Other codes name their state: `identity_held`, `identity_erased`, `already_released`, `already_minted`, `relationship_active` |
-| `AgreelyUnavailableError`   | 503 / network / timeout               |
+| `AgreelyUnavailableError`   | 503 and any other 5xx, a status mapped to no other error, a network failure or a timeout. The envelope's code, field and reason are kept when the server sent one |
 | `AgreelyConfigError`        | bad client config, or input refused before the wire call |
 
 ```php
@@ -1105,11 +1111,16 @@ composer test          # fast offline unit suite (mock transport)
 composer stan          # phpstan level max
 vendor/bin/phpcs       # PSR-12
 
-composer test:contract # live contract + golden-vector parity
+AGREELY_LIVE=1 AGREELY_APP_DIR=../agreely composer test:contract # live contract + golden-vector parity
 ```
 
 The unit suite is fully offline (mock transport) and always runs. The contract
 suite (`composer test:contract`) asserts the PHP SDK against a live `/v1` API
 **and** the shared golden vectors (`vectors/vectors.json`) - the cross-SDK
-anti-drift gate (PHP == TS == the contract). Without a seeded fixture from a
-running Agreely stack it skips cleanly.
+anti-drift gate (PHP == TS == the contract). It runs only with `AGREELY_LIVE=1` and a
+fixture seeded from a running Agreely stack (`test/Contract/fixture.json`, never
+committed); otherwise it skips cleanly. The out-of-band revoke step needs
+`AGREELY_APP_DIR`, the checkout of that stack. The 0.5.0 surface needs four more keys
+in the fixture's `keys`, named `attest`, `withdraw`, `registry` and `holds`; a test whose
+key is absent skips. Mind the 120 requests a minute: the rate-limit test exhausts the
+window, so run `test/Contract/LiveSurfaceContractTest.php` on its own a minute later.
