@@ -156,7 +156,7 @@ final class InventoryTest extends TestCase
         }
     }
 
-    public function testMoreThanFiftyRecordSetsIsRefused(): void
+    public function testMoreThanTwoHundredRecordSetsIsRefused(): void
     {
         $http = new MockHttpClient([MockHttpClient::json(200, [])]);
         $input = $this->declaration();
@@ -171,7 +171,8 @@ final class InventoryTest extends TestCase
             $this->replace($http, $input);
             $this->fail('expected AgreelyConfigError');
         } catch (AgreelyConfigError $e) {
-            $this->assertStringContainsString('at most 50 record sets', $e->getMessage());
+            $this->assertSame(200, Inventory::MAX_SETS);
+            $this->assertStringContainsString('at most 200 record sets', $e->getMessage());
             $this->assertCount(0, $http->calls);
         }
     }

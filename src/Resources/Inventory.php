@@ -37,8 +37,8 @@ use Agreely\Sdk\Types\Wire;
  */
 final class Inventory
 {
-    /** At most this many record sets per host system, mirrored from the server. */
-    public const MAX_SETS = 50;
+    /** At most this many record sets per declaration, mirrored from the server (50 before 0.5.0). */
+    public const MAX_SETS = 200;
 
     /** At most this many fields per record set, mirrored from the server. */
     public const MAX_FIELDS = 60;
@@ -68,10 +68,15 @@ final class Inventory
      *
      * REFUSED CLIENT-SIDE, before any wire call (AgreelyConfigError): an EMPTY category
      * list (it would read as "withdraw everything", which a serialisation bug must never
-     * do in one call), more than 50 sets, a set with no fields or more than 60, a
+     * do in one call), more than 200 sets, a set with no fields or more than 60, a
      * malformed hostSystem or key, and any member outside the documented ones. The body
      * carries only key / label / labelEn / fields, so nothing else on the input leaves
      * the process. NEVER auto-retried.
+     *
+     * ⚠️ NEW SET KEYS ARE RATIONED TOO: an organisation introduces at most 1000 set keys
+     * it never declared before in any rolling 30 days (422 code new_set_limit, field
+     * categories). A key declared before is always accepted, so re-declaring the same
+     * list always passes; renaming keys on every call is what the limit refuses.
      *
      * ⚠️ `hostSystem` NEW VALUES ARE RATIONED: at most 10 distinct ones per organisation
      * in any rolling 30 days, so a pod name or a deployment slot locks you out within
@@ -215,8 +220,9 @@ final class Inventory
 
     /**
      * A label is a NAME, so it is required to be a non-empty string here. The server
-     * holds the rest of the rule (NFC, 1 to 120 characters, no control character, no
-     * leading spreadsheet formula character, and no value-shaped text: an at sign, a run
+     * holds the rest of the rule (NFC, 1 to 120 characters for a set label and 1 to 200
+     * for a field label, no control character, no leading spreadsheet formula character,
+     * and no value-shaped text: an at sign, a run
      * of five digits, a calendar date). Those are deliberately NOT re-implemented
      * client-side: the refusal names a PATH and never echoes what was sent, and
      * duplicating the value-shape heuristic here would drift from the register's own.
