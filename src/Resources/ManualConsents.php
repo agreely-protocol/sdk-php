@@ -5,10 +5,12 @@ declare(strict_types=1);
 namespace Agreely\Sdk\Resources;
 
 use Agreely\Sdk\Errors\AgreelyConfigError;
+use Agreely\Sdk\HostInput;
 use Agreely\Sdk\Http\RequestSpec;
 use Agreely\Sdk\Http\Transport;
 use Agreely\Sdk\IdempotencyKey;
 use Agreely\Sdk\Types\ClaimLink;
+use Agreely\Sdk\Types\ConsentSheet;
 use Agreely\Sdk\Types\ManualConsentErasure;
 use Agreely\Sdk\Types\ManualConsentResult;
 use Agreely\Sdk\Types\ManualConsentRevocation;
@@ -20,9 +22,21 @@ use Agreely\Sdk\Types\ManualConsentRevocation;
  * (tier "manual"). revoke() also withdraws VERBAL cells (scope 'attest' or
  * 'attest_verbal'); erase() needs 'attest'.
  * Keyed throughout on the protocol consentRef (0x-hex), never an internal uuid.
+ *
+ * Every refusal carries a stable `reason` on the thrown error ({@see \Agreely\Sdk\Errors\ErrorReason}):
+ * branch on it, never on the message.
  */
 final class ManualConsents
 {
+    /** The members a consent-sheet request accepts, and no others. */
+    private const SHEET_MEMBERS = ['documentVersionId', 'locale'];
+
+    /** The members a paper record accepts, and no others. */
+    private const RECORD_MEMBERS = [
+        'customerId', 'documentVersionId', 'effectiveDate', 'validUntil', 'items', 'evidence',
+        'versionAttested', 'sensitiveExpressAttested',
+    ];
+
     public function __construct(private readonly Transport $transport)
     {
     }
@@ -47,9 +61,24 @@ final class ManualConsents
      * END of that calendar day in the tenant's timezone; an instant needs an offset.
      *
      * Refused with 409 (AgreelyConflictError, code "conflict", do not retry): a
-     * purpose already held by an active passkey-signed consent, or a record for the
-     * same customer and document while a verbal consent awaits its paper (send that
-     * paper with verbalConsents()->confirmWithPaper instead).
+     * purpose already held by an active passkey-signed consent (reason
+     * stronger_consent_active), a record for the same customer and document while a
+     * verbal consent awaits its paper (verbal_awaits_paper: send that paper with
+     * verbalConsents()->confirmWithPaper instead), an ended relationship
+     * (relationship_ended), a paper signed before a withdrawal recorded for the same
+     * purpose (predates_withdrawal), or a new sheet over a consent still in force that
+     * would end before it (renewal_ends_before_current). An effectiveDate given as an
+     * instant in the future by any amount is a 422 (effective_date_in_future).
+     *
+     * TWO ATTESTATIONS, each sent only as JSON true (anything but a boolean is refused
+     * before the call, and false is the same as leaving it out):
+     *   - versionAttested: REQUIRED true when the paper was signed BEFORE the chosen
+     *     version was published in Agreely. The organisation attests that the signed
+     *     document asked consent for the same purposes, and gave the same information,
+     *     as that version (422 version_attestation_required otherwise).
+     *   - sensitiveExpressAttested: REQUIRED true when a ticked purpose is sensitive and
+     *     rests on the consent basis: the organisation attests that the consent was
+     *     express (422 sensitive_express_required otherwise).
      *
      * IDEMPOTENT on retry: an Idempotency-Key is auto-generated per call (override via
      * $options['idempotencyKey'], 1 to 255 printable ASCII characters, checked before
@@ -64,12 +93,15 @@ final class ManualConsents
      *     effectiveDate:string,
      *     validUntil:string,
      *     items:list<string|array{category:string,purpose:string}>,
-     *     evidence:array{pdfSha256:string,pdf?:string}
+     *     evidence:array{pdfSha256:string,pdf?:string},
+     *     versionAttested?:bool,
+     *     sensitiveExpressAttested?:bool
      * } $input
      * @param array{idempotencyKey?:string} $options
      */
     public function record(array $input, array $options = []): ManualConsentResult
     {
+        HostInput::closed($input, self::RECORD_MEMBERS, 'manualConsents.record');
         foreach (['customerId', 'documentVersionId', 'effectiveDate', 'validUntil', 'items', 'evidence'] as $required) {
             if (!isset($input[$required])) {
                 throw new AgreelyConfigError("manualConsents.record requires \"{$required}\".");
@@ -87,17 +119,32 @@ final class ManualConsents
 
         $idempotencyKey = IdempotencyKey::resolve($options, 'manualConsents.record');
 
+        $body = [
+            'customerId' => $input['customerId'],
+            'documentVersionId' => $input['documentVersionId'],
+            'effectiveDate' => $input['effectiveDate'],
+            'validUntil' => $input['validUntil'],
+            'items' => $input['items'],
+            'evidence' => $wireEvidence,
+        ];
+        // A statutory attestation is a JSON boolean and nothing else: the server refuses "true" or 1 with a 422,
+        // so it is refused here, where the mistake is. Only true is sent; false is the server's default.
+        foreach (['versionAttested', 'sensitiveExpressAttested'] as $flag) {
+            if (!array_key_exists($flag, $input)) {
+                continue;
+            }
+            if (!is_bool($input[$flag])) {
+                throw new AgreelyConfigError("manualConsents.record: \"{$flag}\" must be a boolean.");
+            }
+            if ($input[$flag]) {
+                $body[$flag] = true;
+            }
+        }
+
         $wire = $this->transport->request(new RequestSpec(
             method: 'POST',
             path: '/v1/manual-consents',
-            body: [
-                'customerId' => $input['customerId'],
-                'documentVersionId' => $input['documentVersionId'],
-                'effectiveDate' => $input['effectiveDate'],
-                'validUntil' => $input['validUntil'],
-                'items' => $input['items'],
-                'evidence' => $wireEvidence,
-            ],
+            body: $body,
             headers: ['Idempotency-Key' => $idempotencyKey],
             idempotentRetry: false,
         ));
@@ -110,9 +157,13 @@ final class ManualConsents
      * the recorded attestation. Mutates (mints a token); never auto-retried. Minting
      * retires any link still live for the same customer.
      *
-     * A customerId the company holds no record of is AgreelyNotFoundError (404) and
-     * writes nothing; a customer whose relationship has ended is AgreelyConflictError
-     * (409, code "conflict").
+     * A customerId the company holds no record of is AgreelyNotFoundError (404, reason
+     * unknown_customer) and writes nothing; a customer whose relationship has ended is
+     * AgreelyConflictError (409, code "conflict", reason relationship_ended).
+     *
+     * For a paper the person signs, prefer {@see ManualConsents::createConsentSheet()}:
+     * it prints the sheet and mints this link in one call, bound to the reference
+     * printed on the sheet.
      *
      * @param array{customerId:string,reference?:string} $input
      */
@@ -146,8 +197,16 @@ final class ManualConsents
      * that does not exist). Read `gate` on the result: "superseded" means a later
      * consent still backs the gate. Withdrawing the manual cell that confirmed a
      * verbal one withdraws that verbal cell too. A verbal ref whose paper already came
-     * back is AgreelyConflictError (409): withdraw the confirming manual ref instead
-     * (see verbalConsents()->get()).
+     * back is AgreelyConflictError (409, reason superseded_by_paper): withdraw the
+     * confirming manual ref instead (see verbalConsents()->get()).
+     *
+     * A withdrawal attaches to the PURPOSE: every other consent still running for it (a
+     * renewal and the paper it renewed, a newer sheet and the one it replaced) is
+     * withdrawn at the same instant. When the person later signed the same purpose
+     * online with her passkey, that signed consent holds the gate and this route never
+     * ends it: AgreelyConflictError (409, reason citizen_consent_at_gate), nothing
+     * written. Record her withdrawal with withdrawals()->record() (scope 'withdraw')
+     * instead, which withdraws both at one instant.
      *
      * @param array{reason?:string} $input
      */
@@ -173,7 +232,12 @@ final class ManualConsents
      * (0x-hex). Scope 'attest' only: an erasure cannot be undone. Idempotent
      * server-side; never auto-retried. Erasing the manual cell that confirmed a verbal
      * consent also erases that verbal cell; a verbal ref whose paper came back is
-     * AgreelyConflictError (409).
+     * AgreelyConflictError (409, reason superseded_by_paper). Erasing a consent still in
+     * force WITHDRAWS (never erases) every other consent running for the same purpose,
+     * and `gate` on the result says what /v1/check does now. While a consent the person
+     * signed online holds the purpose it is a 409 (reason citizen_consent_at_gate) and
+     * nothing is written: record her withdrawal with withdrawals()->record() first,
+     * then erase.
      *
      * @param array{reason?:string} $input
      */
@@ -192,5 +256,71 @@ final class ManualConsents
         ));
 
         return ManualConsentErasure::fromWire($wire);
+    }
+
+    /**
+     * Print the SIGNATURE SHEET of one published version for one customer, minted with
+     * the claim the person may later redeem (POST /v1/customers/{customerRef}/consent-sheets,
+     * scope 'attest'). The same sheet the web paper flow prints; it never names the person.
+     *
+     * PRINTING IS A MINT. `printedReference` (printed on the sheet) is the second factor
+     * of the claim link minted in the same call. It and the claim token are returned ONCE,
+     * here, and no call can recover them. A new sheet retires any claim still live for
+     * this customer, so the reference on a previous sheet stops working.
+     *
+     * 🔴 TWO RULES THE HOST MUST KEEP:
+     *   - NEVER send the claim link in the same envelope or message as the sheet. The
+     *     printed reference only defends a link that travels separately; both together
+     *     make it decorative.
+     *   - NEVER send the hash of this BLANK sheet as `evidence.pdfSha256` to
+     *     {@see ManualConsents::record()}. The evidence is the SIGNED sheet, scanned or
+     *     photographed once it comes back; that is why the response carries no hash.
+     *
+     * `documentVersionId` is required (a PUBLISHED version of this organisation's
+     * documents, 422 reason invalid_document otherwise); `locale` is "fr" (the default)
+     * or "en". A version that asks no consent has nothing to sign (422 code
+     * no_consent_ask, reason notice_only). An unknown customer is AgreelyNotFoundError
+     * (reason unknown_customer, the claim-link answer); an ended relationship is
+     * AgreelyConflictError (reason relationship_ended).
+     *
+     * The Idempotency-Key is a LATCH, never a replay of the answer: a retry with the same
+     * key and body mints nothing and answers AgreelyConflictError (code and reason
+     * already_minted), because the reference and the token are never stored to be
+     * replayed. A key is generated per call unless you pass one. NEVER auto-retried.
+     * The server renders the PDF, so the call's budget is the `timeout` option, else the
+     * client's `timeout` or 15000 ms, whichever is larger.
+     *
+     * @param array{documentVersionId:string,locale?:string} $input
+     * @param array{idempotencyKey?:string,timeout?:int} $options
+     */
+    public function createConsentSheet(string $customerRef, array $input, array $options = []): ConsentSheet
+    {
+        $label = 'manualConsents.createConsentSheet';
+        $ref = HostInput::customerRef($customerRef, $label);
+        HostInput::closed($input, self::SHEET_MEMBERS, $label);
+        $versionId = $input['documentVersionId'] ?? null;
+        if (!is_string($versionId) || trim($versionId) === '') {
+            throw new AgreelyConfigError("{$label} requires \"documentVersionId\".");
+        }
+        HostInput::closed($options, ['idempotencyKey', 'timeout'], $label);
+
+        $wire = $this->transport->request(new RequestSpec(
+            method: 'POST',
+            path: '/v1/customers/' . rawurlencode($ref) . '/consent-sheets',
+            body: [
+                'documentVersionId' => trim($versionId),
+                'locale' => HostInput::locale($input['locale'] ?? 'fr', "{$label}: locale"),
+            ],
+            headers: ['Idempotency-Key' => IdempotencyKey::resolve($options, $label)],
+            idempotentRetry: false,
+            timeoutMs: HostInput::renderBudget(
+                $options,
+                $this->transport->timeoutMs(),
+                ConsentDocuments::DOCUMENT_TIMEOUT_MS,
+                $label,
+            ),
+        ));
+
+        return ConsentSheet::fromWire($wire);
     }
 }

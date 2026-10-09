@@ -139,6 +139,59 @@ final class HostInput
         return $value;
     }
 
+    /**
+     * The company's OWN customer reference (the ref /v1/check takes), never a DID: 1 to
+     * 200 characters once trimmed, as the server bounds it. A "/" in it is fine (it is
+     * percent-encoded into ONE path segment).
+     */
+    public static function customerRef(mixed $value, string $method): string
+    {
+        $ref = is_string($value) ? trim($value) : '';
+        if ($ref === '' || mb_strlen($ref) > 200) {
+            throw new AgreelyConfigError("{$method} requires a customerRef of 1 to 200 characters.");
+        }
+        return $ref;
+    }
+
+    /** A document language: "fr" or "en", nothing else (the server refuses any other). */
+    public static function locale(mixed $value, string $label): string
+    {
+        if ($value !== 'fr' && $value !== 'en') {
+            throw new AgreelyConfigError("{$label} must be \"fr\" or \"en\".");
+        }
+        return $value;
+    }
+
+    /**
+     * The time budget of a call the server answers by rendering a PDF: the caller's
+     * `timeout` option when given (a positive number of milliseconds), else the client's
+     * budget or $floorMs, whichever is larger. An 800 ms budget sized for the consent
+     * check would cut a render off and read as an outage.
+     *
+     * @param array<string,mixed> $options
+     */
+    public static function renderBudget(array $options, int $clientTimeoutMs, int $floorMs, string $label): int
+    {
+        if (!array_key_exists('timeout', $options) || $options['timeout'] === null) {
+            return max($clientTimeoutMs, $floorMs);
+        }
+        $timeout = $options['timeout'];
+        if (!is_int($timeout) || $timeout <= 0) {
+            throw new AgreelyConfigError("{$label}: timeout must be a positive number of milliseconds.");
+        }
+        return $timeout;
+    }
+
+    /** A uuid path segment (a documentVersionId), refused client-side when it is not one. */
+    public static function uuid(mixed $value, string $label): string
+    {
+        $id = is_string($value) ? strtolower(trim($value)) : '';
+        if (preg_match('/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/D', $id) !== 1) {
+            throw new AgreelyConfigError("{$label} must be a uuid, as documentVersionId reads in consentDocuments()->list().");
+        }
+        return $id;
+    }
+
     /** A non-empty identifier a path segment is built from (a ruleKey, a statementKey). */
     public static function pathKey(mixed $value, string $method, string $name): string
     {

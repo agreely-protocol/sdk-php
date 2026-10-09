@@ -14,6 +14,10 @@ namespace Agreely\Sdk\Types;
  * `tier` carry the proof behind a record-backed answer ({@see Assurance},
  * {@see ConsentTier}) and are null otherwise, including for an acknowledged
  * informed line. Treat an unknown assurance or tier as NOT acceptable.
+ *
+ * `validUntil` (the backing consent's end) and `revokedAt` (the withdrawal instant, on
+ * "revoked" only) mean exactly what they mean on {@see CheckResult}: null when there is
+ * no consent record to date.
  */
 final class BatchDecision
 {
@@ -28,6 +32,8 @@ final class BatchDecision
         public readonly string $checkedAt,
         public readonly ?string $basis = null,
         public readonly ?string $tier = null,
+        public readonly ?string $validUntil = null,
+        public readonly ?string $revokedAt = null,
     ) {
     }
 
@@ -45,6 +51,8 @@ final class BatchDecision
             Wire::str($wire['checkedAt'] ?? null),
             Wire::nullableStr($wire['basis'] ?? null),
             Wire::nullableStr($wire['tier'] ?? null),
+            Wire::nullableStr($wire['validUntil'] ?? null),
+            Wire::nullableStr($wire['revokedAt'] ?? null),
         );
     }
 

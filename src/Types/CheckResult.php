@@ -29,6 +29,17 @@ namespace Agreely\Sdk\Types;
  *   tier      -> the same proof under its stored name ({@see ConsentTier}:
  *                "full" | "manual" | "verbal"); present exactly when `assurance` is.
  *                The HOST decides what each tier may unlock
+ *   validUntil -> the end of the consent backing the answer, an ISO 8601 UTC instant
+ *                ("2027-10-09T03:59:59Z"), on every status backed by a consent
+ *                record (revoked, expired and relationship_ended included). Null when
+ *                there is no consent record to date (none, necessity, the named
+ *                refusals: the key is absent from the wire), on an acknowledged
+ *                informed line, on a legacy consent recorded with no end, and on a
+ *                degraded result. It is an UPPER BOUND, never a cache lease: a
+ *                withdrawal ends the consent before it and reaches only a host that
+ *                checks again, and a renewal moves it. Read it on every check
+ *   revokedAt -> when the withdrawal took effect, an ISO 8601 UTC instant, on status
+ *                "revoked" only; null otherwise
  */
 final class CheckResult
 {
@@ -42,6 +53,8 @@ final class CheckResult
         public readonly ?string $assurance = null,
         public readonly ?string $basis = null,
         public readonly ?string $tier = null,
+        public readonly ?string $validUntil = null,
+        public readonly ?string $revokedAt = null,
     ) {
     }
 
@@ -56,6 +69,8 @@ final class CheckResult
             assurance: Wire::nullableStr($wire['assurance'] ?? null),
             basis: Wire::nullableStr($wire['basis'] ?? null),
             tier: Wire::nullableStr($wire['tier'] ?? null),
+            validUntil: Wire::nullableStr($wire['validUntil'] ?? null),
+            revokedAt: Wire::nullableStr($wire['revokedAt'] ?? null),
         );
     }
 

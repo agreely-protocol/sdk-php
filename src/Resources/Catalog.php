@@ -4,10 +4,12 @@ declare(strict_types=1);
 
 namespace Agreely\Sdk\Resources;
 
+use Agreely\Sdk\HostInput;
 use Agreely\Sdk\Http\RequestSpec;
 use Agreely\Sdk\Http\Transport;
 use Agreely\Sdk\Types\CatalogCells;
 use Agreely\Sdk\Types\CatalogEntry;
+use Agreely\Sdk\Types\DocumentCatalog;
 use Agreely\Sdk\Types\Wire;
 
 /**
@@ -28,6 +30,10 @@ final class Catalog
     /**
      * The company's active declared catalog.
      *
+     * 🔴 NEVER DECIDE CONSENT FROM A CACHED CATALOG. A cell listed here says what the
+     * organisation declared, not what a person consented to: gate every use on a live
+     * check() (which is never cached either).
+     *
      * @return list<CatalogEntry>
      */
     public function list(): array
@@ -41,6 +47,28 @@ final class Catalog
             static fn (array $e): CatalogEntry => CatalogEntry::fromWire($e),
             Wire::objects($wire, 'catalog'),
         );
+    }
+
+    /**
+     * The active cells of ONE published consent document (GET /v1/catalog?documentCode=),
+     * with the tenant's regime and the document's current `documentVersionId`: one call
+     * builds an intake form for that document AND names the version to record against.
+     * Right for a single intake screen, where rendering the whole catalog would ask a
+     * person about holdings the document never covered.
+     *
+     * Scope 'check' OR 'issue'. An unknown code and another tenant's code are the same
+     * AgreelyNotFoundError.
+     */
+    public function forDocument(string $documentCode): DocumentCatalog
+    {
+        $code = HostInput::pathKey($documentCode, 'catalog.forDocument', 'documentCode');
+        $wire = $this->transport->request(new RequestSpec(
+            method: 'GET',
+            path: '/v1/catalog',
+            query: ['documentCode' => $code],
+            idempotentRetry: true,
+        ));
+        return DocumentCatalog::fromWire($wire);
     }
 
     /**

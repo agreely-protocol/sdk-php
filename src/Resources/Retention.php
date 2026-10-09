@@ -12,7 +12,16 @@ use Agreely\Sdk\Errors\AgreelyValidationError;
 use Agreely\Sdk\HostInput;
 use Agreely\Sdk\Http\RequestSpec;
 use Agreely\Sdk\Http\Transport;
+use Agreely\Sdk\IdempotencyKey;
+use Agreely\Sdk\Types\CustomerRetention;
+use Agreely\Sdk\Types\Disposition;
+use Agreely\Sdk\Types\DispositionDeclaration;
+use Agreely\Sdk\Types\HoldFeedPage;
+use Agreely\Sdk\Types\HoldsSync;
+use Agreely\Sdk\Types\PlacedHold;
 use Agreely\Sdk\Types\PurgeDeclaration;
+use Agreely\Sdk\Types\ReleasedHold;
+use Agreely\Sdk\Types\RetentionHold;
 use Agreely\Sdk\Types\PurgeMethod;
 use Agreely\Sdk\Types\RetentionRule;
 use Agreely\Sdk\Types\RetentionRuleDetail;
@@ -20,9 +29,14 @@ use Agreely\Sdk\Types\RetentionRuleList;
 use Agreely\Sdk\Types\RetentionRuleSnapshot;
 use Agreely\Sdk\Types\RetentionSweep;
 use Agreely\Sdk\Types\RulesForPurge;
+use Generator;
 
 /**
- * The host-retention resource (scope: 'retention').
+ * The host-retention resource. THREE SCOPES, one per kind of call:
+ *   'retention'  the decided rules, and the purges and passes a host system declares
+ *   'holds'      the feed of the retention holds in place (listHolds, holdPages, syncHolds)
+ *   'registry'   ONE customer's posture, dispositions and holds (getCustomerRetention,
+ *                declareDisposition, placeHold, releaseHold)
  *
  * « Agreely décide et surveille, l'hôte exécute et rend compte. » Agreely DECIDES the
  * rules and RECORDS what the host declares; the host reads the decisions, runs its
@@ -62,6 +76,21 @@ final class Retention
 
     /** The members a pass accepts, and no others. */
     private const SWEEP_MEMBERS = ['sweptAt', 'hostSystem'];
+
+    /** The holds feed pages one sync reads before it refuses to go on. */
+    public const HOLDS_MAX_PAGES = 1000;
+
+    /** The free-text bound of a hold provision, a disposition reason and a release reason. */
+    public const HOLD_TEXT_MAX = 2000;
+
+    /** The bound of a disposition's conservation-rule reference. */
+    public const SCHEDULE_REF_MAX = 200;
+
+    /** The members a disposition accepts, and no others. */
+    private const DISPOSITION_MEMBERS = ['disposition', 'reason', 'retentionUntil', 'scheduleRef'];
+
+    /** The members a hold accepts, and no others: a host never links a rights request. */
+    private const HOLD_MEMBERS = ['ground', 'provision', 'scope', 'startedOn', 'reviewOn'];
 
     public function __construct(
         private readonly Transport $transport,
@@ -275,6 +304,379 @@ final class Retention
             idempotentRetry: false,
         ));
         return RetentionSweep::fromWire($wire);
+    }
+
+    /**
+     * ONE PAGE of the retention-hold feed (GET /v1/retention/holds, scope 'holds', never
+     * granted by default: a purge job's key carries 'retention' AND 'holds').
+     *
+     * What a purge job reads before it purges anything: REFERENCES AND SCOPE, never why.
+     *   no changedSince  a SNAPSHOT: every ACTIVE hold, which REPLACES your whole active set
+     *   changedSince     a DELTA: every hold placed or released since, each with its status
+     * Pages hold at most 500 rows. Pass `nextPageToken` back as pageToken, unchanged, until
+     * a page answers `cursor`: that is the next sync's changedSince. A pageToken carries its
+     * own changedSince, so one sent beside it is ignored by the server.
+     *
+     * Most callers want {@see Retention::syncHolds()}, which follows the pages.
+     *
+     * @param array{changedSince?:string|null,pageToken?:string|null} $input
+     */
+    public function listHolds(array $input = []): HoldFeedPage
+    {
+        $label = 'retention.listHolds';
+        HostInput::closed($input, ['changedSince', 'pageToken'], $label);
+        foreach (['changedSince', 'pageToken'] as $name) {
+            if (isset($input[$name]) && !is_string($input[$name])) {
+                throw new AgreelyConfigError("{$label}: \"{$name}\" must be a string.");
+            }
+        }
+        $wire = $this->transport->request(new RequestSpec(
+            method: 'GET',
+            path: '/v1/retention/holds',
+            query: [
+                'changedSince' => $input['changedSince'] ?? null,
+                'pageToken' => $input['pageToken'] ?? null,
+            ],
+            idempotentRetry: true,
+        ));
+        return HoldFeedPage::fromWire($wire);
+    }
+
+    /**
+     * Every PAGE of one sync, following `nextPageToken` for you, as a Generator. The LAST
+     * page carries `cursor`. Bounded by `maxPages` (default 1000 pages, 500,000 holds).
+     * Most jobs want {@see Retention::syncHolds()}, which collects the pages and refuses a
+     * partial feed.
+     *
+     *   foreach ($agreely->retention()->holdPages(['changedSince' => $stored]) as $page) { ... }
+     *
+     * @param array{changedSince?:string|null,maxPages?:int} $input
+     * @return Generator<int, HoldFeedPage>
+     */
+    public function holdPages(array $input = []): Generator
+    {
+        HostInput::closed($input, ['changedSince', 'maxPages'], 'retention.holdPages');
+        $maxPages = isset($input['maxPages']) && is_int($input['maxPages']) && $input['maxPages'] > 0
+            ? $input['maxPages']
+            : self::HOLDS_MAX_PAGES;
+        $changedSince = $input['changedSince'] ?? null;
+        $pageToken = null;
+        for ($page = 0; $page < $maxPages; $page++) {
+            $result = $this->listHolds($pageToken === null
+                ? ['changedSince' => $changedSince]
+                : ['pageToken' => $pageToken]);
+            yield $result;
+            if ($result->isLast()) {
+                return;
+            }
+            $pageToken = $result->nextPageToken;
+        }
+    }
+
+    /**
+     * ONE COMPLETE SYNC of the holds feed: every page read and collected, with the
+     * `cursor` to persist for the next sync ({@see HoldsSync}).
+     *
+     *   mode "snapshot" (no changedSince) REPLACES your whole active set
+     *   mode "delta"    (changedSince)    every hold placed or released since, with its status
+     * Delivery is AT LEAST ONCE: upsert by id.
+     *
+     * 🔴 FAIL CLOSED: purge only after this returns. Any error (401, 403, 402, a 5xx, a
+     * timeout) THROWS, and a purge job treats it as "do not purge this run" and stores no
+     * cursor. Reading `maxPages` pages without reaching the last one throws
+     * AgreelyConfigError rather than returning a partial feed: an incomplete held set
+     * read as complete would let a purge destroy what a hold keeps.
+     *
+     * @param array{changedSince?:string|null,maxPages?:int} $input
+     */
+    public function syncHolds(array $input = []): HoldsSync
+    {
+        $holds = [];
+        foreach ($this->holdPages($input) as $page) {
+            foreach ($page->holds as $hold) {
+                $holds[] = $hold;
+            }
+            if ($page->cursor !== null && $page->cursor !== '') {
+                $mode = ($input['changedSince'] ?? null) !== null ? HoldsSync::MODE_DELTA : HoldsSync::MODE_SNAPSHOT;
+                return new HoldsSync($mode, $holds, $page->cursor);
+            }
+        }
+        throw new AgreelyConfigError(
+            'retention.syncHolds stopped before the last page of the holds feed (no cursor), so the held set is '
+            . 'INCOMPLETE. Purge nothing this run; raise maxPages if your organisation genuinely holds that many.',
+        );
+    }
+
+    /**
+     * One customer's retention posture (GET /v1/customers/{customerRef}/retention, scope
+     * 'registry'): the
+     * relationship, the DERIVED clock with its recipe, the standing disposition and the
+     * holds ({@see CustomerRetention}).
+     *
+     * The top-level `clock->dueAt` is the earliest horizon of a rule NO hold suspends; a
+     * rule a hold covers says `held` and its date is arithmetic, not a date to act on.
+     * The clock never invents a period: with no declared rule it is null with reason
+     * "no_declared_rule".
+     */
+    public function getCustomerRetention(string $customerRef): CustomerRetention
+    {
+        $ref = HostInput::customerRef($customerRef, 'retention.getCustomerRetention');
+        $wire = $this->transport->request(new RequestSpec(
+            method: 'GET',
+            path: '/v1/customers/' . rawurlencode($ref) . '/retention',
+            idempotentRetry: true,
+        ));
+        return CustomerRetention::fromWire($wire);
+    }
+
+    /**
+     * DECLARE what your system did with one customer's information once the relationship
+     * ENDED (POST /v1/customers/{customerRef}/retention/dispositions, scope 'registry'): "destroyed",
+     * "anonymized" or "legal_hold" ({@see Disposition}).
+     *
+     * - reason          REQUIRED for legal_hold: name the law that imposes the delay. At
+     *                   most 2000 characters, encrypted, never echoed.
+     * - retentionUntil  legal_hold only, YYYY-MM-DD.
+     * - scheduleRef     optional, the conservation rule it was made under (a public body's
+     *                   approved calendrier rule), at most 200 characters, never verified.
+     *
+     * APPEND-ONLY: a correction is a superseding declaration. Re-declaring the one that
+     * STANDS replays it (`appended` false). A relationship that has not ended is a 409
+     * AgreelyConflictError code relationship_active: end it first with
+     * relationships()->end(), or place a hold to keep information while it runs. A
+     * declaration made while a hold is in place is recorded, with a `hold_active` warning.
+     *
+     * 🔴 IRREVERSIBLE SIDE EFFECT. An appended destroyed or anonymized declaration removes
+     * the name, email, basis note and notice language Agreely holds for this customer, in
+     * the same transaction, unless an active hold on ALL the information keeps them. Read
+     * `declaration->agreelyIdentity` ({@see \Agreely\Sdk\Types\AgreelyIdentity}).
+     *
+     * NEVER auto-retried.
+     *
+     * @param array{disposition:string,reason?:string,retentionUntil?:string,scheduleRef?:string} $input
+     */
+    public function declareDisposition(string $customerRef, array $input): DispositionDeclaration
+    {
+        $label = 'retention.declareDisposition';
+        $ref = HostInput::customerRef($customerRef, $label);
+        HostInput::closed($input, self::DISPOSITION_MEMBERS, $label);
+
+        $disposition = $input['disposition'] ?? null;
+        if (!is_string($disposition) || !in_array($disposition, Disposition::ALL, true)) {
+            throw new AgreelyConfigError("{$label}: disposition must be one of " . implode(', ', Disposition::ALL) . '.');
+        }
+        $isHold = $disposition === Disposition::LEGAL_HOLD;
+        $body = ['disposition' => $disposition];
+
+        $reason = self::optionalText($input, 'reason', self::HOLD_TEXT_MAX, $label);
+        if ($isHold && $reason === null) {
+            throw new AgreelyConfigError(
+                "{$label}: a \"legal_hold\" requires a reason naming the law that imposes the retention delay.",
+            );
+        }
+        if ($reason !== null) {
+            $body['reason'] = $reason;
+        }
+        if (($input['retentionUntil'] ?? null) !== null) {
+            if (!$isHold) {
+                throw new AgreelyConfigError(
+                    "{$label}: retentionUntil applies only to a \"legal_hold\": a destroyed or anonymized record has "
+                    . 'no remaining conservation horizon.',
+                );
+            }
+            $body['retentionUntil'] = HostInput::calendarDay($input['retentionUntil'], "{$label}: retentionUntil");
+        }
+        $scheduleRef = self::optionalText($input, 'scheduleRef', self::SCHEDULE_REF_MAX, $label);
+        if ($scheduleRef !== null) {
+            $body['scheduleRef'] = $scheduleRef;
+        }
+
+        $wire = $this->transport->request(new RequestSpec(
+            method: 'POST',
+            path: '/v1/customers/' . rawurlencode($ref) . '/retention/dispositions',
+            body: $body,
+            idempotentRetry: false,
+        ));
+        return DispositionDeclaration::fromWire($wire);
+    }
+
+    /**
+     * PLACE a retention hold on one customer (POST /v1/customers/{customerRef}/retention/holds,
+     * scope 'registry'): their information must be kept despite the retention rules, on a
+     * live or an ended relationship.
+     *
+     * - ground     REQUIRED: "rights_request" (the information is the subject of an access
+     *              or rectification request, P-39.1 s. 36 / A-2.1 s. 102.1) or "other_law".
+     * - provision  REQUIRED for "other_law", refused otherwise: the provision of the law
+     *              that requires the keeping, at most 2000 characters, never verified.
+     * - scope      "all" (the default), or ['rules' => [...], 'cells' => [...]] with keys
+     *              from retention()->listRules() and catalog()->listCells().
+     * - startedOn  optional YYYY-MM-DD, today or earlier on the organisation's calendar;
+     *              defaults to today.
+     * - reviewOn   optional YYYY-MM-DD, a REMINDER only: nothing ever releases a hold on it.
+     *
+     * A host never links a rights request; the rights register places its own holds.
+     * At most 50 active holds per customer (422 code too_many_holds) and 1000 holds
+     * placed through /v1 per organisation per 24 hours (429 AgreelyDailyCapError code
+     * hold_budget_exhausted). An Idempotency-Key is generated per call unless you pass
+     * one: the same key and body replays the first answer (`replayed` true). NEVER
+     * auto-retried.
+     *
+     * @param array{ground:string,provision?:string,scope?:string|array{rules?:list<string>,cells?:list<string>},startedOn?:string,reviewOn?:string} $input
+     * @param array{idempotencyKey?:string} $options
+     */
+    public function placeHold(string $customerRef, array $input, array $options = []): PlacedHold
+    {
+        $label = 'retention.placeHold';
+        $ref = HostInput::customerRef($customerRef, $label);
+        HostInput::closed($input, self::HOLD_MEMBERS, $label);
+
+        $ground = $input['ground'] ?? null;
+        if ($ground !== RetentionHold::GROUND_RIGHTS_REQUEST && $ground !== RetentionHold::GROUND_OTHER_LAW) {
+            throw new AgreelyConfigError("{$label}: ground must be \"rights_request\" or \"other_law\".");
+        }
+        $body = ['ground' => $ground];
+
+        $provision = self::optionalText($input, 'provision', self::HOLD_TEXT_MAX, $label);
+        if ($ground === RetentionHold::GROUND_OTHER_LAW && $provision === null) {
+            throw new AgreelyConfigError(
+                "{$label}: an \"other_law\" hold requires a provision naming the law that requires the information "
+                . 'to be kept.',
+            );
+        }
+        if ($ground === RetentionHold::GROUND_RIGHTS_REQUEST && $provision !== null) {
+            throw new AgreelyConfigError("{$label}: a provision applies only to an \"other_law\" hold.");
+        }
+        if ($provision !== null) {
+            $body['provision'] = $provision;
+        }
+        if (array_key_exists('scope', $input) && $input['scope'] !== null) {
+            $body['scope'] = self::holdScope($input['scope'], $label);
+        }
+        foreach (['startedOn', 'reviewOn'] as $day) {
+            if (($input[$day] ?? null) !== null) {
+                $body[$day] = HostInput::calendarDay($input[$day], "{$label}: {$day}");
+            }
+        }
+
+        $wire = $this->transport->request(new RequestSpec(
+            method: 'POST',
+            path: '/v1/customers/' . rawurlencode($ref) . '/retention/holds',
+            body: $body,
+            headers: ['Idempotency-Key' => IdempotencyKey::resolve($options, $label)],
+            idempotentRetry: false,
+        ));
+        return PlacedHold::fromWire($wire);
+    }
+
+    /**
+     * RELEASE one active hold (POST /v1/customers/{customerRef}/retention/holds/{holdId}/release,
+     * scope 'registry'), whoever placed it, with a REQUIRED `reason` (at most 2000 characters, encrypted,
+     * never echoed). Releasing is the organisation's decision: Agreely never computes
+     * when a hold may end and does not verify that a person's recourses are exhausted.
+     *
+     * A hold your system did not place (`placedBy` "organization") counts against a
+     * rolling 24-hour cap (20 unless the operator set another value; 429
+     * AgreelyDailyCapError code hold_release_cap_reached), and the workspace owner is
+     * emailed. An already released hold is a 409 AgreelyConflictError code
+     * already_released. An unknown or another customer's hold id is AgreelyNotFoundError.
+     *
+     * 🔴 IRREVERSIBLE SIDE EFFECT. Releasing the last hold on ALL the information while a
+     * destroyed or anonymized declaration stands removes the name, email, basis note and
+     * notice language Agreely holds: `agreelyIdentity` is then "erased".
+     *
+     * An Idempotency-Key is generated per call unless you pass one. NEVER auto-retried.
+     *
+     * @param array{reason:string} $input
+     * @param array{idempotencyKey?:string} $options
+     */
+    public function releaseHold(string $customerRef, string $holdId, array $input, array $options = []): ReleasedHold
+    {
+        $label = 'retention.releaseHold';
+        $ref = HostInput::customerRef($customerRef, $label);
+        $hold = HostInput::pathKey($holdId, $label, 'holdId');
+        HostInput::closed($input, ['reason'], $label);
+        $reason = self::optionalText($input, 'reason', self::HOLD_TEXT_MAX, $label);
+        if ($reason === null) {
+            throw new AgreelyConfigError("{$label} requires a reason: lifting a hold is a motivated act.");
+        }
+
+        $wire = $this->transport->request(new RequestSpec(
+            method: 'POST',
+            path: '/v1/customers/' . rawurlencode($ref) . '/retention/holds/' . rawurlencode($hold) . '/release',
+            body: ['reason' => $reason],
+            headers: ['Idempotency-Key' => IdempotencyKey::resolve($options, $label)],
+            idempotentRetry: false,
+        ));
+        return ReleasedHold::fromWire($wire);
+    }
+
+    /**
+     * An optional free-text member: null when absent, null or blank; else the string,
+     * refused over $max characters (the server refuses rather than truncates, so a
+     * shortened justification never records a ground it does not carry).
+     *
+     * @param array<array-key,mixed> $input
+     */
+    private static function optionalText(array $input, string $name, int $max, string $label): ?string
+    {
+        $value = $input[$name] ?? null;
+        if ($value === null) {
+            return null;
+        }
+        if (!is_string($value)) {
+            throw new AgreelyConfigError("{$label}: {$name} must be a string.");
+        }
+        if (trim($value) === '') {
+            return null;
+        }
+        if (mb_strlen(trim($value)) > $max) {
+            throw new AgreelyConfigError("{$label}: {$name} must be at most {$max} characters; it is never truncated.");
+        }
+        return $value;
+    }
+
+    /**
+     * A hold scope: "all", or a closed {rules, cells} object of string lists, at least one
+     * of them non-empty.
+     *
+     * @return string|array{rules?:list<string>,cells?:list<string>}
+     */
+    private static function holdScope(mixed $scope, string $label): string|array
+    {
+        if ($scope === 'all') {
+            return 'all';
+        }
+        if (!is_array($scope) || ($scope !== [] && array_is_list($scope))) {
+            throw new AgreelyConfigError(
+                "{$label}: scope must be \"all\" or ['rules' => [...], 'cells' => [...]].",
+            );
+        }
+        HostInput::closed($scope, ['rules', 'cells'], "{$label} scope");
+        $out = [];
+        foreach (['rules', 'cells'] as $key) {
+            if (!array_key_exists($key, $scope)) {
+                continue;
+            }
+            $list = $scope[$key];
+            if (!is_array($list) || !array_is_list($list)) {
+                throw new AgreelyConfigError("{$label}: scope.{$key} must be a list of keys.");
+            }
+            $keys = [];
+            foreach ($list as $i => $id) {
+                if (!is_string($id) || trim($id) === '') {
+                    throw new AgreelyConfigError("{$label}: scope.{$key}[{$i}] must be a key string.");
+                }
+                $keys[] = $id;
+            }
+            $out[$key] = $keys;
+        }
+        if (($out['rules'] ?? []) === [] && ($out['cells'] ?? []) === []) {
+            throw new AgreelyConfigError(
+                "{$label}: scope must list at least one retention rule or catalogue cell, or be \"all\".",
+            );
+        }
+        return $out;
     }
 
     /**

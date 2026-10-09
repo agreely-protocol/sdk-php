@@ -66,11 +66,28 @@ final class VerbalConsents
      *   rests on the consent basis. isMinor, paperExpected and sensitiveExpressAttested
      *   are sent only when true.
      *
-     * Refusals: 422 AgreelyValidationError (bad input, a notice-only document, an
-     * answer on an informed line); 409 AgreelyConflictError code "conflict" (a purpose
-     * already held by an active paper or passkey consent, or a relationship that has
-     * ended: do not retry); 429 AgreelyVerbalDailyCapError (the organisation's daily
-     * limit of verbal consents, never auto-retried).
+     * - scriptVersion: YOUR OWN label for the script the agent read (Agreely keeps it
+     *   as given; it names no Agreely object).
+     *
+     * RENEWAL OVER PAPER. A signed paper consent whose end falls within its last 30
+     * calendar days (an Agreely product rule, not a statutory period) can be renewed by
+     * telephone with this same call: a "yes" for that purpose is a NEW consent, the paper
+     * is never rewritten, and /v1/check answers tier "verbal" with the new validUntil
+     * until the new signed paper comes back (confirmWithPaper(), which raises it to
+     * "manual" with that same validUntil). The renewal may not end before the paper
+     * (409 reason renewal_ends_before_current) nor be dated before its signature (409
+     * renewal_predates_current). A "no" at renewal withdraws nothing. Withdrawing either
+     * consent later withdraws both. A passkey consent is never renewed by telephone.
+     *
+     * Refusals, each with a stable `reason` ({@see \Agreely\Sdk\Errors\ErrorReason}):
+     * 422 AgreelyValidationError (bad input, a notice-only document, an answer on an
+     * informed line, an obtainedAt in the future by any amount: obtained_at_in_future);
+     * 409 AgreelyConflictError code "conflict", do not retry (stronger_consent_active or
+     * all_covered: a purpose held by an active paper or passkey consent outside the
+     * renewal window; relationship_ended; predates_withdrawal: a call dated before a
+     * withdrawal recorded for the same purpose; the two renewal reasons above); 429
+     * AgreelyVerbalDailyCapError (the organisation's daily limit of verbal consents,
+     * never auto-retried).
      *
      * @param array{
      *     customerId:string,
@@ -140,12 +157,12 @@ final class VerbalConsents
      * (manualConsents()->record).
      *
      * - signedAt: a DateTimeInterface or RFC 3339 WITH an offset, no earlier than the
-     *   call and not in the future.
+     *   call and not in the future by any amount (422 reason signed_at_in_future).
      * - evidence.pdfSha256 is required; evidence.pdf (base64) is optional escrow and
      *   must hash to it (422 otherwise); an empty or non-PDF file is refused.
      *
-     * One paper per verbal consent: a second one, or a relationship that has ended, is
-     * AgreelyConflictError (409). An unknown, foreign or non-verbal id is
+     * One paper per verbal consent: a second one (reason already_confirmed), or a
+     * relationship that has ended (relationship_ended), is AgreelyConflictError (409). An unknown, foreign or non-verbal id is
      * AgreelyNotFoundError (404).
      *
      * @param array{

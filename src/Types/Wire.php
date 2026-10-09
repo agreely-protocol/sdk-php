@@ -26,6 +26,27 @@ final class Wire
         return (bool) $value;
     }
 
+    public static function int(mixed $value, int $default = 0): int
+    {
+        return is_numeric($value) ? (int) $value : $default;
+    }
+
+    /**
+     * A nested JSON object member, or null when it is absent or not an object.
+     *
+     * @param array<string,mixed> $wire
+     * @return array<string,mixed>|null
+     */
+    public static function object(array $wire, string $key): ?array
+    {
+        $value = $wire[$key] ?? null;
+        if (!is_array($value)) {
+            return null;
+        }
+        /** @var array<string,mixed> $value (JSON objects decode to string keys) */
+        return $value;
+    }
+
     /**
      * Coerce a wire array field into a list of strings (non-scalar entries dropped).
      *

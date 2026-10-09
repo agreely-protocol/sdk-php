@@ -13,12 +13,15 @@ use Agreely\Sdk\Http\HttpClient;
 use Agreely\Sdk\Http\RequestSpec;
 use Agreely\Sdk\Http\Transport;
 use Agreely\Sdk\Resources\Catalog;
+use Agreely\Sdk\Resources\ConsentDocuments;
 use Agreely\Sdk\Resources\ConsentRequests;
+use Agreely\Sdk\Resources\Customers;
 use Agreely\Sdk\Resources\Inventory;
 use Agreely\Sdk\Resources\ManualConsents;
 use Agreely\Sdk\Resources\Relationships;
 use Agreely\Sdk\Resources\Retention;
 use Agreely\Sdk\Resources\VerbalConsents;
+use Agreely\Sdk\Resources\Withdrawals;
 use Agreely\Sdk\Types\BatchCheckItem;
 use Agreely\Sdk\Types\BatchDecision;
 use Agreely\Sdk\Types\CheckFieldsResult;
@@ -73,6 +76,9 @@ final class Agreely
     private readonly Catalog $catalog;
     private readonly Retention $retention;
     private readonly Inventory $inventory;
+    private readonly ConsentDocuments $consentDocuments;
+    private readonly Customers $customers;
+    private readonly Withdrawals $withdrawals;
     private readonly string $baseUrl;
 
     /**
@@ -148,6 +154,9 @@ final class Agreely
         // are windows during which the client acts on something other than a live answer.
         $this->retention = new Retention($this->transport, $maxDegradeWindowMs);
         $this->inventory = new Inventory($this->transport);
+        $this->consentDocuments = new ConsentDocuments($this->transport);
+        $this->customers = new Customers($this->transport);
+        $this->withdrawals = new Withdrawals($this->transport);
     }
 
     /** The consent-request resource (issuance, scope 'issue'). */
@@ -187,8 +196,10 @@ final class Agreely
     }
 
     /**
-     * The host-retention resource (scope 'retention'): read the rules the organisation
-     * DECIDED, and declare the purges and passes a host system ran under them.
+     * The host-retention resource: read the rules the organisation DECIDED and declare the
+     * purges and passes a host system ran under them (scope 'retention'), read the feed of
+     * the retention holds in place (scope 'holds'), and read or act on ONE customer's
+     * posture, dispositions and holds (scope 'registry').
      *
      * 🔴 It fails closed IN THE OTHER DIRECTION from check(). For a purge job, failing
      * closed means NOT PURGING: see {@see Retention::rulesForPurge()}.
@@ -208,6 +219,35 @@ final class Agreely
         return $this->inventory;
     }
 
+    /**
+     * The published consent documents (scope 'check' or 'issue'): where a
+     * documentVersionId comes from, and the information PDF to hand to a person (which
+     * 'attest' and 'attest_verbal' keys may also fetch).
+     */
+    public function consentDocuments(): ConsentDocuments
+    {
+        return $this->consentDocuments;
+    }
+
+    /**
+     * One customer's registry identity (scope 'registry'), as metadata, addressed by one
+     * customerRef you already hold. The same customer's retention posture, dispositions
+     * and holds are on {@see Agreely::retention()}.
+     */
+    public function customers(): Customers
+    {
+        return $this->customers;
+    }
+
+    /**
+     * Record a person's withdrawal of a consent on her behalf (scope 'withdraw', never
+     * granted by default). The one route that never answers the billing 402.
+     */
+    public function withdrawals(): Withdrawals
+    {
+        return $this->withdrawals;
+    }
+
     /** The configured API base URL (client-side; the resolved endpoint in use). */
     public function baseUrl(): string
     {
@@ -216,10 +256,18 @@ final class Agreely
 
     /**
      * Identify the presented key against the server (GET /v1/whoami): the REAL,
-     * server-verified scopes it carries. Least-disclosure — the wire response is
-     * scopes-only (no company id, no key name, no PII). Any valid key reaches it.
-     * The returned Identity also echoes the configured baseUrl (client-side). A
-     * read; safe to auto-retry on a transient outage.
+     * server-verified scopes it carries, and the minimum needed to discover its
+     * organisation (name, sector, statute, public policy url). Least-disclosure: no
+     * company id, no key name, no PII. Any valid key reaches it. The returned Identity
+     * also echoes the configured baseUrl (client-side). A read; safe to auto-retry on a
+     * transient outage.
+     *
+     * 🔴 THE HEALTH PROBE, AND HOW TO RUN IT. Call it about ONCE A MINUTE from a SINGLE
+     * scheduler (a cron, a leader), never per request or per worker: the 120 requests a
+     * minute are shared by every key of the organisation. On an AgreelyAuthError (401)
+     * or an AgreelyBillingInactiveError (402), PURGE anything you cached from Agreely and
+     * FAIL CLOSED. Never cache check() (a withdrawal must deny on the very next call), and
+     * never decide consent from a cached catalog.
      */
     public function identity(): Identity
     {
