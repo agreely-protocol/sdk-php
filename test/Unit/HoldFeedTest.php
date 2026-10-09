@@ -183,4 +183,25 @@ final class HoldFeedTest extends TestCase
         $sync = $this->client($http)->retention()->syncHolds();
         $this->assertSame(['1', '2'], array_map(static fn ($h) => $h->id, $sync->active()));
     }
+
+    public function testANonStringChangedSinceIsRefusedNotReadAsASnapshot(): void
+    {
+        foreach ([1728000000, ['c1'], true] as $bad) {
+            $http = new MockHttpClient([MockHttpClient::json(200, ['holds' => [], 'nextPageToken' => null, 'cursor' => 'c'])]);
+            try {
+                /** @phpstan-ignore argument.type (the point is a shape the type forbids) */
+                $this->client($http)->retention()->syncHolds(['changedSince' => $bad]);
+                $this->fail('expected AgreelyConfigError for ' . json_encode($bad));
+            } catch (AgreelyConfigError) {
+                $this->assertCount(0, $http->calls);
+            }
+            try {
+                /** @phpstan-ignore argument.type (the point is a shape the type forbids) */
+                iterator_to_array($this->client($http)->retention()->holdPages(['changedSince' => $bad]));
+                $this->fail('expected AgreelyConfigError from holdPages for ' . json_encode($bad));
+            } catch (AgreelyConfigError) {
+                $this->assertCount(0, $http->calls);
+            }
+        }
+    }
 }

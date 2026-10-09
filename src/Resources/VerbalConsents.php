@@ -108,6 +108,7 @@ final class VerbalConsents
     {
         $label = 'verbalConsents.record';
         HostInput::closed($input, self::RECORD_MEMBERS, $label);
+        HostInput::closed($options, ['idempotencyKey'], $label);
         foreach (['customerId', 'documentVersionId', 'obtainedBy', 'scriptVersion', 'validUntil'] as $required) {
             if (!isset($input[$required]) || !is_string($input[$required]) || trim($input[$required]) === '') {
                 throw new AgreelyConfigError("{$label} requires \"{$required}\".");
@@ -177,6 +178,7 @@ final class VerbalConsents
         $label = 'verbalConsents.confirmWithPaper';
         $id = HostInput::pathKey($consentId, $label, 'consentId');
         HostInput::closed($input, self::PAPER_MEMBERS, $label);
+        HostInput::closed($options, ['idempotencyKey'], $label);
         $evidence = $input['evidence'] ?? null;
         if (!is_array($evidence) || !isset($evidence['pdfSha256']) || !is_string($evidence['pdfSha256'])) {
             throw new AgreelyConfigError("{$label} requires \"evidence.pdfSha256\".");

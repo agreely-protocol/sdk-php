@@ -102,6 +102,21 @@ final class IssuanceVectorTest extends TestCase
             return;
         }
 
+        if ($case['includeItems']) {
+            // The vector's invariant is that the body never carries a caller's items. Since
+            // 0.5.0 the input is closed, so an `items` member is REFUSED before the call
+            // rather than dropped; the same input without it must produce the vector's body.
+            try {
+                $agreely->consentRequests()->create($input);
+                $this->fail('Expected AgreelyConfigError for a caller-supplied items list.');
+            } catch (AgreelyConfigError $e) {
+                $this->assertStringContainsString('items', $e->getMessage());
+            }
+            $this->assertCount(0, $http->calls, 'A refused items list sends nothing.');
+            /** @var array{customerId:string,recipientEmail:string,consentDocumentId?:string,documentCode?:string,validUntil:string} $input */
+            $input = $this->buildInput($golden, ['includeItems' => false] + $case);
+        }
+
         $agreely->consentRequests()->create($input);
         $this->assertCount(1, $http->calls);
         $call = $http->calls[0];

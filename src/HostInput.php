@@ -226,7 +226,13 @@ final class HostInput
             $name = is_string($member) && preg_match('/^[A-Za-z][A-Za-z0-9_]{0,31}$/D', $member) === 1
                 ? $member
                 : 'a member';
-            if (is_string($member) && strcasecmp(str_replace('-', '', $member), 'idempotencykey') === 0) {
+            // In a body, a key-shaped member is the header put in the wrong place. In the options
+            // themselves (where idempotencyKey is allowed), it is a misspelling: name the right one.
+            if (
+                !in_array('idempotencyKey', $allowed, true)
+                && is_string($member)
+                && strcasecmp(str_replace('-', '', $member), 'idempotencykey') === 0
+            ) {
                 throw new AgreelyConfigError(
                     "{$label}: the Idempotency-Key is a HEADER, not a body member. Pass it as the "
                     . '$options argument: [\'idempotencyKey\' => ...].',

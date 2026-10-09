@@ -7,8 +7,10 @@ namespace Agreely\Sdk\Resources;
 use Agreely\Sdk\Errors\AgreelyConfigError;
 use Agreely\Sdk\Errors\AgreelyRateLimitError;
 use Agreely\Sdk\Errors\AgreelyTimeoutError;
+use Agreely\Sdk\HostInput;
 use Agreely\Sdk\Http\RequestSpec;
 use Agreely\Sdk\Http\Transport;
+use Agreely\Sdk\IdempotencyKey;
 use Agreely\Sdk\Types\CancelledRequest;
 use Agreely\Sdk\Types\ConsentRequestPage;
 use Agreely\Sdk\Types\ConsentRequestRecord;
@@ -25,6 +27,12 @@ final class ConsentRequests
     /** The terminal (settled) consent-request statuses, asks_declined included. */
     private const TERMINAL_STATUSES = ConsentRequestStatus::TERMINAL;
 
+    /**
+     * The members create() accepts, and no others: an `items` list from an older
+     * integration is refused, never dropped while the request goes out without it.
+     */
+    private const CREATE_MEMBERS = ['customerId', 'recipientEmail', 'validUntil', 'consentDocumentId', 'documentCode'];
+
     /** Default guard so an unbounded list can never spin forever. */
     private const DEFAULT_MAX_PAGES = 1000;
 
@@ -39,7 +47,12 @@ final class ConsentRequests
      * server-side. NEVER auto-retried (it emails): an Idempotency-Key is
      * auto-generated per call (override via $options['idempotencyKey']) so a
      * caller-driven retry replays the original 201 byte-for-byte rather than
-     * double-issuing.
+     * double-issuing. Your key must be 1 to 255 printable ASCII characters (a space or
+     * a line break is refused before any header is built), and $options is closed: a
+     * misspelt option is refused rather than silently letting a fresh key be generated,
+     * which would send the person a SECOND email on a retry. The input is closed too:
+     * a member other than customerId, recipientEmail, validUntil, consentDocumentId and
+     * documentCode (say an `items` list) is refused before the call.
      *
      * validUntil: a plain date (YYYY-MM-DD) means through the END of that calendar
      * day in the tenant's timezone; an instant must be RFC 3339 WITH an offset. A
@@ -51,6 +64,7 @@ final class ConsentRequests
      */
     public function create(array $input, array $options = []): IssuedRequest
     {
+        HostInput::closed($input, self::CREATE_MEMBERS, 'consentRequests.create');
         foreach (['customerId', 'recipientEmail', 'validUntil'] as $required) {
             if (!isset($input[$required])) {
                 throw new AgreelyConfigError("consentRequests.create requires \"{$required}\".");
@@ -69,7 +83,8 @@ final class ConsentRequests
             );
         }
 
-        $idempotencyKey = $options['idempotencyKey'] ?? self::generateIdempotencyKey();
+        HostInput::closed($options, ['idempotencyKey'], 'consentRequests.create');
+        $idempotencyKey = IdempotencyKey::resolve($options, 'consentRequests.create');
 
         $body = [
             'customerId' => $input['customerId'],
@@ -284,22 +299,5 @@ final class ConsentRequests
     private function nowMs(): float
     {
         return microtime(true) * 1000;
-    }
-
-    /** A unique Idempotency-Key per create call (a v4-style uuid). */
-    private static function generateIdempotencyKey(): string
-    {
-        $bytes = random_bytes(16);
-        $bytes[6] = chr((ord($bytes[6]) & 0x0f) | 0x40);
-        $bytes[8] = chr((ord($bytes[8]) & 0x3f) | 0x80);
-        $hex = bin2hex($bytes);
-        return sprintf(
-            'idem_%s-%s-%s-%s-%s',
-            substr($hex, 0, 8),
-            substr($hex, 8, 4),
-            substr($hex, 12, 4),
-            substr($hex, 16, 4),
-            substr($hex, 20, 12),
-        );
     }
 }

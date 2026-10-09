@@ -117,6 +117,7 @@ final class ManualConsents
             $wireEvidence['pdf'] = $evidence['pdf'];
         }
 
+        HostInput::closed($options, ['idempotencyKey'], 'manualConsents.record');
         $idempotencyKey = IdempotencyKey::resolve($options, 'manualConsents.record');
 
         $body = [

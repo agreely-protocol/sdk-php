@@ -218,6 +218,7 @@ final class Retention
         $label = 'retention.declarePurge';
         $key = HostInput::pathKey($ruleKey, $label, 'ruleKey');
         HostInput::closed($input, self::PURGE_MEMBERS, $label);
+        HostInput::closed($options, ['idempotencyKey'], $label);
         $idempotencyKey = HostInput::idempotencyKey($options, $label);
 
         $method = PurgeMethod::assert($input['method'] ?? null, $label);
@@ -284,6 +285,7 @@ final class Retention
         $label = 'retention.declareSweep';
         $key = HostInput::pathKey($ruleKey, $label, 'ruleKey');
         HostInput::closed($input, self::SWEEP_MEMBERS, $label);
+        HostInput::closed($options, ['idempotencyKey'], $label);
         $idempotencyKey = HostInput::idempotencyKey($options, $label);
 
         $sweptAt = HostInput::instant($input['sweptAt'] ?? null, "{$label}: sweptAt");
@@ -366,7 +368,7 @@ final class Retention
         $maxPages = isset($input['maxPages']) && is_int($input['maxPages']) && $input['maxPages'] > 0
             ? $input['maxPages']
             : self::HOLDS_MAX_PAGES;
-        $changedSince = self::changedSince($input);
+        $changedSince = self::changedSince($input, $label);
         $pageToken = null;
         for ($page = 0; $page < $maxPages; $page++) {
             $result = $this->listHolds($pageToken === null
@@ -404,6 +406,7 @@ final class Retention
      */
     public function syncHolds(array $input = []): HoldsSync
     {
+        $mode = self::changedSince($input, 'retention.syncHolds') === null ? HoldsSync::MODE_SNAPSHOT : HoldsSync::MODE_DELTA;
         $holds = [];
         $cursor = '';
         foreach ($this->holdPages($input) as $page) {
@@ -412,7 +415,6 @@ final class Retention
             }
             $cursor = (string) $page->cursor;
         }
-        $mode = self::changedSince($input) === null ? HoldsSync::MODE_SNAPSHOT : HoldsSync::MODE_DELTA;
         return new HoldsSync($mode, $holds, $cursor);
     }
 
@@ -692,14 +694,18 @@ final class Retention
 
     /**
      * The sync's changedSince: null for a snapshot, an empty string included (the server
-     * reads an empty one as absent, so it must not be reported as a delta).
+     * reads an empty one as absent, so it must not be reported as a delta). Anything but a
+     * string or null is refused, never read as a snapshot.
      *
      * @param array<string,mixed> $input
      */
-    private static function changedSince(array $input): ?string
+    private static function changedSince(array $input, string $label): ?string
     {
         $value = $input['changedSince'] ?? null;
-        return is_string($value) && $value !== '' ? $value : null;
+        if ($value !== null && !is_string($value)) {
+            throw new AgreelyConfigError("{$label}: \"changedSince\" must be a string, the cursor of a previous sync.");
+        }
+        return $value === null || $value === '' ? null : $value;
     }
 
     /** The refusal of a feed that did not provably end: never act on a partial held set. */
