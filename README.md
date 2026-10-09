@@ -194,6 +194,11 @@ replays the original answer and records nothing new, so a dropped connection can
 double-issue or double-attest. The SDK generates a key per call; pass your own only
 when you have a durable, operation-unique id.
 
+On every keyed write `$options` is **closed** and your key must be 1 to 255 printable
+ASCII characters: a misspelt option (`idempotency_key`) or a malformed key is refused
+before the call, because a fresh key generated in its place would make a retry a second
+request (a second email, a second consent).
+
 `manualConsents()->createConsentSheet` is the exception: its key is a **latch**, not a
 replay. The same key and body mints nothing and answers 409 `already_minted`, because
 the printed reference and the claim token are never stored to be replayed.

@@ -19,10 +19,24 @@ TypeScript extends it here too, so its fields sit directly on it (`$placed->id`,
   `versionAttested` and `sensitiveExpressAttested` is refused before the call
   (`AgreelyConfigError`) instead of being dropped. A misspelt statutory attestation
   must fail loudly, not reach the server as "not attested".
+- **Every write that takes an Idempotency-Key takes CLOSED options**:
+  `consentRequests()->create`, `manualConsents()->record`,
+  `verbalConsents()->record`, `verbalConsents()->confirmWithPaper`,
+  `retention()->declarePurge` and `retention()->declareSweep` (the new writes are closed
+  from the start). A misspelt option such as `idempotency_key` is refused before the
+  call. Before, it was ignored and a fresh key generated in its place, so a retry was a
+  second request: a second email for a consent request, a second paper or telephone
+  consent.
+- **`consentRequests()->create` validates its key and closes its input.** The key must
+  be 1 to 255 printable ASCII characters, as on every other keyed write: a space, a line
+  break (a header injection) or a non-string is refused before any header is built.
+  A member other than `customerId`, `recipientEmail`, `validUntil`, `consentDocumentId`
+  and `documentCode` (an `items` list, say) is refused instead of dropped.
 - **A 429 keeps the code it was sent with, and only `rate_limited` is ever
   auto-retried.** Before, any 429 this client did not know read `rate_limited` and could
   be retried on a read with `maxRetries` set. The rule, the same in both SDKs: a known
-  daily-cap code, or any 429 whose reason is `daily_cap`, raises `AgreelyDailyCapError`;
+  daily-cap code, or any 429 whose reason is `daily_cap` (whatever its code, even
+  `rate_limited` or none), raises `AgreelyDailyCapError`;
   `sweep_too_frequent` raises `AgreelySweepTooFrequentError`; any other code raises the
   base `AgreelyRateLimitError` keeping its code; none of them is retried.
 - **Closed vocabularies gained values.** `Scope::ALL` adds `withdraw` and `holds`
