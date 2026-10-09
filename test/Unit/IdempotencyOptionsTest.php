@@ -131,18 +131,26 @@ final class IdempotencyOptionsTest extends TestCase
         }
     }
 
-    public function testAConsentRequestInputIsClosed(): void
+    public function testAConsentRequestInputIsClosedExceptTheLegacyItemsList(): void
     {
-        $http = new MockHttpClient([MockHttpClient::json(201, [])]);
-        try {
-            $this->client($http)->consentRequests()->create([
-                'customerId' => 'c', 'recipientEmail' => 'r@example.com', 'consentDocumentId' => self::UUID,
-                'validUntil' => '2031-01-01', 'items' => ['0xcat'],
-            ]);
-            $this->fail('expected AgreelyConfigError');
-        } catch (AgreelyConfigError $e) {
-            $this->assertStringContainsString('items', $e->getMessage());
-            $this->assertCount(0, $http->calls);
+        $base = [
+            'customerId' => 'c', 'recipientEmail' => 'r@example.com', 'consentDocumentId' => self::UUID,
+            'validUntil' => '2031-01-01',
+        ];
+        foreach (['recipientName' => 'Marie', 'consentDocumentID' => self::UUID, 'idempotencyKey' => 'k'] as $member => $value) {
+            $http = new MockHttpClient([MockHttpClient::json(201, [])]);
+            try {
+                $this->client($http)->consentRequests()->create($base + [$member => $value]);
+                $this->fail("expected AgreelyConfigError for {$member}");
+            } catch (AgreelyConfigError) {
+                $this->assertCount(0, $http->calls, "{$member} sent nothing");
+            }
         }
+
+        // The golden vectors pin a legacy items list as accepted and DROPPED, never sent.
+        $http = new MockHttpClient([MockHttpClient::json(201, [])]);
+        $this->client($http)->consentRequests()->create($base + ['items' => ['0xcat']]);
+        $this->assertNotNull($http->calls[0]->body);
+        $this->assertArrayNotHasKey('items', $http->calls[0]->body);
     }
 }

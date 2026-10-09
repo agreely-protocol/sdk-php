@@ -28,10 +28,12 @@ final class ConsentRequests
     private const TERMINAL_STATUSES = ConsentRequestStatus::TERMINAL;
 
     /**
-     * The members create() accepts, and no others: an `items` list from an older
-     * integration is refused, never dropped while the request goes out without it.
+     * The members create() accepts, and no others. The one member accepted and NOT sent is
+     * a legacy `items` list, which the golden vectors shared with the TypeScript twin pin
+     * as DROPPED: the items derive from the document server-side. Any other member is
+     * refused, never dropped while the request goes out without it.
      */
-    private const CREATE_MEMBERS = ['customerId', 'recipientEmail', 'validUntil', 'consentDocumentId', 'documentCode'];
+    private const CREATE_MEMBERS = ['customerId', 'recipientEmail', 'validUntil', 'consentDocumentId', 'documentCode', 'items'];
 
     /** Default guard so an unbounded list can never spin forever. */
     private const DEFAULT_MAX_PAGES = 1000;
@@ -52,7 +54,9 @@ final class ConsentRequests
      * misspelt option is refused rather than silently letting a fresh key be generated,
      * which would send the person a SECOND email on a retry. The input is closed too:
      * a member other than customerId, recipientEmail, validUntil, consentDocumentId and
-     * documentCode (say an `items` list) is refused before the call.
+     * documentCode is refused before the call. The one exception is a legacy `items`
+     * list, accepted and never sent, as the golden vectors shared with the TypeScript
+     * twin pin it.
      *
      * validUntil: a plain date (YYYY-MM-DD) means through the END of that calendar
      * day in the tenant's timezone; an instant must be RFC 3339 WITH an offset. A

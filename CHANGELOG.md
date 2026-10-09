@@ -30,8 +30,9 @@ TypeScript extends it here too, so its fields sit directly on it (`$placed->id`,
 - **`consentRequests()->create` validates its key and closes its input.** The key must
   be 1 to 255 printable ASCII characters, as on every other keyed write: a space, a line
   break (a header injection) or a non-string is refused before any header is built.
-  A member other than `customerId`, `recipientEmail`, `validUntil`, `consentDocumentId`
-  and `documentCode` (an `items` list, say) is refused instead of dropped.
+  Its input is closed except the legacy `items` list, which is still dropped: a member
+  other than `customerId`, `recipientEmail`, `validUntil`, `consentDocumentId`,
+  `documentCode` and `items` is refused instead of dropped.
 - **A 429 keeps the code it was sent with, and only `rate_limited` is ever
   auto-retried.** Before, any 429 this client did not know read `rate_limited` and could
   be retried on a read with `maxRetries` set. The rule, the same in both SDKs: a known
