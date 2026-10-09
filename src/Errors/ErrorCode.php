@@ -46,6 +46,14 @@ final class ErrorCode
     public const HOLD_RELEASE_CAP_REACHED = 'hold_release_cap_reached';
     public const SWEEP_TOO_FREQUENT = 'sweep_too_frequent';
 
+    /** The 429 codes of a rolling 24-hour cap: each raises an AgreelyDailyCapError. */
+    public const DAILY_CAPS = [
+        self::VERBAL_DAILY_CAP,
+        self::WITHDRAWAL_DAILY_CAP,
+        self::HOLD_BUDGET_EXHAUSTED,
+        self::HOLD_RELEASE_CAP_REACHED,
+    ];
+
     // 422 that name their refusal in the code.
     public const NO_CONSENT_ASK = 'no_consent_ask';
     public const ENGLISH_TEXT_MISSING = 'english_text_missing';
@@ -56,9 +64,26 @@ final class ErrorCode
     public const IDEMPOTENCY_KEY_REQUIRED = 'idempotency_key_required';
     public const IDEMPOTENCY_KEY_REUSED = 'idempotency_key_reused';
 
-    // Raised by this client, never sent by the server.
+    // 422 of the host declarations (purges, passes) and the inventory.
+    public const INVALID_METHOD = 'invalid_method';
+    public const ANONYMIZATION_PROCESS_REQUIRED = 'anonymization_process_required';
+    public const INVALID_ANONYMIZATION_PROCESS = 'invalid_anonymization_process';
+    public const INVALID_RECORDS_AFFECTED = 'invalid_records_affected';
+    public const RAN_AT_IN_FUTURE = 'ran_at_in_future';
+    public const SWEPT_AT_IN_FUTURE = 'swept_at_in_future';
+    public const INVALID_COVERED_PERIOD = 'invalid_covered_period';
+    public const INVALID_HOST_TOKEN = 'invalid_host_token';
+    public const VALUE_SHAPED_LABEL = 'value_shaped_label';
+    public const INVALID_KEY = 'invalid_key';
+    public const DUPLICATE_KEY = 'duplicate_key';
+    public const LIMIT_EXCEEDED = 'limit_exceeded';
+    public const EMPTY_DECLARATION = 'empty_declaration';
+
+    // Raised by a client, never sent by the server.
     public const CONFIG = 'config';
     public const TIMEOUT = 'timeout';
+    /** The TypeScript twin's code for a call cancelled by its AbortSignal. This client has no such signal and never raises it. */
+    public const ABORTED = 'aborted';
 
     private function __construct()
     {

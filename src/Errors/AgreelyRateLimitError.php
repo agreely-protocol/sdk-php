@@ -5,10 +5,15 @@ declare(strict_types=1);
 namespace Agreely\Sdk\Errors;
 
 /**
- * 429. `code` "rate_limited" is the per-company request window (the only 429 the
- * SDK may auto-retry, and only on an idempotent read when maxRetries is set). Every
- * other 429 code is a cap that waiting seconds does not lift, and has its own
- * subclass: {@see AgreelySweepTooFrequentError}, {@see AgreelyDailyCapError}.
+ * 429. THE RULE (the same in both SDKs):
+ *
+ *   - `rate_limited`, the per-company request window, is the ONLY code ever
+ *     auto-retried, and only on an idempotent read when maxRetries is set.
+ *   - `sweep_too_frequent` raises {@see AgreelySweepTooFrequentError}.
+ *   - a known daily-cap code ({@see ErrorCode::DAILY_CAPS}), or any 429 whose reason
+ *     is `daily_cap`, raises {@see AgreelyDailyCapError} keeping its code.
+ *   - any OTHER code raises this base class, keeping the code it was sent with, and is
+ *     never retried.
  */
 class AgreelyRateLimitError extends AgreelyError
 {

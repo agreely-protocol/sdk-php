@@ -12,6 +12,7 @@ use Agreely\Sdk\Errors\AgreelyDailyCapError;
 use Agreely\Sdk\Errors\AgreelyError;
 use Agreely\Sdk\Errors\AgreelyNotFoundError;
 use Agreely\Sdk\Errors\AgreelyRateLimitError;
+use Agreely\Sdk\Errors\AgreelyUnavailableError;
 use Agreely\Sdk\Errors\AgreelyValidationError;
 use Agreely\Sdk\Errors\AgreelyVerbalDailyCapError;
 use Agreely\Sdk\Errors\ErrorCode;
@@ -151,5 +152,33 @@ final class ErrorReasonTest extends TestCase
         ]);
         $this->assertSame([], $this->client($http, 1)->catalog()->list());
         $this->assertCount(2, $http->calls, 'the minute window is retried on a read when maxRetries allows');
+    }
+
+    public function testAny429WhoseReasonIsDailyCapIsADailyCapKeepingItsCode(): void
+    {
+        $e = $this->catchFrom(self::refusal(429, ['code' => 'a_new_daily_cap', 'reason' => ErrorReason::DAILY_CAP]));
+        $this->assertInstanceOf(AgreelyDailyCapError::class, $e);
+        $this->assertSame('a_new_daily_cap', $e->code);
+    }
+
+    public function testAnUnknown429IsThePlainRateLimitErrorNotADailyCap(): void
+    {
+        $e = $this->catchFrom(self::refusal(429, ['code' => 'a_new_cap', 'reason' => 'something_else']));
+        $this->assertSame(AgreelyRateLimitError::class, $e::class);
+    }
+
+    public function testA5xxAndAnUnmappedStatusKeepTheEnvelope(): void
+    {
+        foreach ([500, 405, 410] as $status) {
+            $e = $this->catchFrom(self::refusal($status, ['code' => 'not_recorded', 'reason' => 'a_reason', 'field' => 'f']));
+            $this->assertInstanceOf(AgreelyUnavailableError::class, $e, "HTTP {$status}");
+            $this->assertSame('not_recorded', $e->code, "HTTP {$status}");
+            $this->assertSame('a_reason', $e->reason);
+            $this->assertSame('f', $e->field);
+            $this->assertFalse($e->retryable);
+        }
+        $e = $this->catchFrom(new MockHttpClient([new \Agreely\Sdk\Http\RawResponse(502, '<html>bad gateway</html>')]));
+        $this->assertInstanceOf(AgreelyUnavailableError::class, $e);
+        $this->assertSame('unavailable', $e->code, 'no envelope: the generic code');
     }
 }

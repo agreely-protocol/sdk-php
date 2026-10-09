@@ -16,6 +16,7 @@ use Agreely\Sdk\Errors\AgreelyUnavailableError;
 use Agreely\Sdk\Errors\AgreelyValidationError;
 use Agreely\Sdk\Errors\AgreelyVerbalDailyCapError;
 use Agreely\Sdk\Errors\ErrorCode;
+use Agreely\Sdk\Errors\ErrorReason;
 
 /**
  * The thin HTTP layer, ported from the TS transport.ts: build the request,
@@ -51,10 +52,11 @@ final class Transport
      * time budget). A mutating call never auto-retries a 429.
      *
      * ONLY the per-company window (code "rate_limited") is ever auto-retried. Every
-     * other 429 is a cap that waiting seconds does not lift, whatever maxRetries says:
-     * AgreelySweepTooFrequentError (the pass being declared is already represented by
-     * the one declared less than 15 minutes ago, so sending it again records a second
-     * pass for the same run) and every AgreelyDailyCapError (a rolling 24-hour cap).
+     * other 429 is never retried, whatever maxRetries says: AgreelySweepTooFrequentError
+     * (the pass being declared is already represented by the one declared less than 15
+     * minutes ago, so sending it again records a second pass for the same run), every
+     * AgreelyDailyCapError (a rolling 24-hour cap), and a 429 whose code this client does
+     * not know (a plain AgreelyRateLimitError keeping that code).
      *
      * @return array<string,mixed> the decoded JSON object
      */
@@ -239,28 +241,38 @@ final class Transport
             case 429:
                 $header = $res->header('Retry-After');
                 $retryAfter = ($header !== null && is_numeric($header)) ? (int) $header : null;
-                switch ($code) {
-                    case ErrorCode::SWEEP_TOO_FREQUENT:
-                        // The per-(rule, hostSystem) 15-minute floor, not the company window.
-                        throw new AgreelySweepTooFrequentError($message, ErrorCode::SWEEP_TOO_FREQUENT, 429, $retryAfter, null, $reason);
-                    case ErrorCode::VERBAL_DAILY_CAP:
-                        // The organisation's daily limit of verbal consents, not the minute window.
-                        throw new AgreelyVerbalDailyCapError($message, ErrorCode::VERBAL_DAILY_CAP, 429, $retryAfter, null, $reason);
-                    case ErrorCode::WITHDRAWAL_DAILY_CAP:
-                    case ErrorCode::HOLD_BUDGET_EXHAUSTED:
-                    case ErrorCode::HOLD_RELEASE_CAP_REACHED:
-                        throw new AgreelyDailyCapError($message, (string) $code, 429, $retryAfter, null, $reason);
+                // THE 429 RULE (the same in both SDKs). `rate_limited` is the only code ever
+                // auto-retried. A known daily-cap code, OR any 429 whose reason is
+                // `daily_cap`, raises AgreelyDailyCapError keeping its code. Any OTHER code
+                // raises the base AgreelyRateLimitError keeping its code, never retried.
+                if ($code === ErrorCode::SWEEP_TOO_FREQUENT) {
+                    // The per-(rule, hostSystem) 15-minute floor, not the company window.
+                    throw new AgreelySweepTooFrequentError($message, ErrorCode::SWEEP_TOO_FREQUENT, 429, $retryAfter, null, $reason);
                 }
-                // The per-company window, or a 429 whose code this client does not know yet:
-                // its code is kept as sent, and only "rate_limited" is ever auto-retried.
+                if ($code === ErrorCode::VERBAL_DAILY_CAP) {
+                    throw new AgreelyVerbalDailyCapError($message, ErrorCode::VERBAL_DAILY_CAP, 429, $retryAfter, null, $reason);
+                }
+                if (in_array($code, ErrorCode::DAILY_CAPS, true) || $reason === ErrorReason::DAILY_CAP) {
+                    throw new AgreelyDailyCapError($message, $code ?? 'rate_limited', 429, $retryAfter, null, $reason);
+                }
                 throw new AgreelyRateLimitError($message, $code ?? 'rate_limited', 429, $retryAfter, null, $reason);
             case 402:
                 // The company's Agreely subscription is inactive/lapsed. Fail-closed for
                 // gating, but distinct from an outage: not transient, not retryable.
                 throw new AgreelyBillingInactiveError($message, $code ?? 'billing_inactive', 402, null, $reason);
             default:
-                // 503 and any other 5xx: unreachable. 503 is retryable for idempotent calls.
-                throw new AgreelyUnavailableError($message, $res->status, $res->status === 503);
+                // 503 and any other 5xx, and any status mapped to no other error (405, 410,
+                // an unfollowed 3xx): unreachable. 503 is retryable for idempotent calls.
+                // The envelope's code, field and reason are kept, as on every API error.
+                throw new AgreelyUnavailableError(
+                    $message,
+                    $res->status,
+                    $res->status === 503,
+                    null,
+                    $code ?? 'unavailable',
+                    $field,
+                    $reason,
+                );
         }
     }
 
