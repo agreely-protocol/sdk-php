@@ -181,4 +181,21 @@ final class ErrorReasonTest extends TestCase
         $this->assertInstanceOf(AgreelyUnavailableError::class, $e);
         $this->assertSame('unavailable', $e->code, 'no envelope: the generic code');
     }
+
+    public function testADailyCapReasonIsNeverAutoRetriedWhateverItsCode(): void
+    {
+        foreach ([['code' => 'rate_limited', 'reason' => 'daily_cap'], ['reason' => 'daily_cap']] as $error) {
+            $http = new MockHttpClient([
+                MockHttpClient::json(429, ['error' => $error + ['message' => 'cap']], ['Retry-After' => '0']),
+                MockHttpClient::json(200, ['catalog' => []]),
+            ]);
+            try {
+                $this->client($http, 2)->catalog()->list();
+                $this->fail('expected AgreelyDailyCapError for ' . json_encode($error));
+            } catch (AgreelyDailyCapError $e) {
+                $this->assertSame('rate_limited', $e->code);
+                $this->assertCount(1, $http->calls, 'an idempotent GET with maxRetries 2 is still sent once');
+            }
+        }
+    }
 }

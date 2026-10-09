@@ -115,7 +115,13 @@ final class Transport
             try {
                 return $this->attempt($spec);
             } catch (AgreelyRateLimitError $error) {
-                if ($error->errorCode() !== ErrorCode::RATE_LIMITED || $rateAttempt >= $rateRetries) {
+                // A daily cap is never retried, whatever its code: a 429 whose reason is
+                // daily_cap may carry code rate_limited, or none at all.
+                if (
+                    $error instanceof AgreelyDailyCapError
+                    || $error->errorCode() !== ErrorCode::RATE_LIMITED
+                    || $rateAttempt >= $rateRetries
+                ) {
                     throw $error;
                 }
                 $rateAttempt++;
