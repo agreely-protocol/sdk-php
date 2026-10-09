@@ -84,10 +84,14 @@ final class LiveContractTest extends TestCase
         // Allows now.
         $this->assertTrue($agreely->check($this->fixture->subject(), $r['category'], $r['purpose']));
 
-        // Flip the enforcement record out-of-band (the M5 revoke path), in-container.
-        $repoRoot = dirname(__DIR__, 2);
+        // Flip the enforcement record out-of-band, in-container. The seed script runs inside
+        // the API stack, so this needs the directory of its docker-compose file.
+        $appDir = getenv('AGREELY_APP_DIR');
+        if (!is_string($appDir) || $appDir === '') {
+            $this->markTestSkipped('The out-of-band revoke needs AGREELY_APP_DIR (the API stack checkout).');
+        }
         exec(
-            'cd ' . escapeshellarg($repoRoot)
+            'cd ' . escapeshellarg($appDir)
             . ' && docker compose exec -T api php scripts/sdk-contract-seed.php revoke '
             . escapeshellarg($r['consentRef']) . ' 2>&1',
             $out,
@@ -114,6 +118,10 @@ final class LiveContractTest extends TestCase
     {
         $entries = $this->client('both')->catalog()->list();
         $this->assertNotEmpty($entries);
+        foreach ($entries as $entry) {
+            $this->assertNotNull($entry->legalBasis, 'the wire carries legalBasis on every entry');
+            $this->assertNotNull($entry->sensitive, 'the wire carries sensitive on every entry');
+        }
         $ids = array_map(static fn ($e): string => $e->id, $entries);
         $this->assertContains($this->fixture->issue()['catalogId'], $ids);
     }
@@ -191,6 +199,10 @@ final class LiveContractTest extends TestCase
         $identity = $this->client('check')->identity();
         $this->assertContains('check', $identity->scopes);
         $this->assertSame($this->fixture->baseUrl(), $identity->baseUrl);
+        // The tenant's public identity, and nothing that identifies the company or the key.
+        $this->assertNotNull($identity->company);
+        $this->assertContains($identity->company->sector, ['private', 'public']);
+        $this->assertContains($identity->company->statute, ['P-39.1', 'A-2.1']);
 
         $issuer = $this->client('issue')->identity();
         $this->assertContains('issue', $issuer->scopes);
@@ -214,7 +226,7 @@ final class LiveContractTest extends TestCase
         $created = $issuer->consentRequests()->create([
             'customerId' => $this->fixture->subject(),
             'recipientEmail' => $issue['recipientEmail'],
-            'items' => [$issue['catalogId']],
+            'consentDocumentId' => $issue['documentId'],
             'validUntil' => $issue['validUntil'],
         ]);
 

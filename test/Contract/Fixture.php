@@ -9,6 +9,10 @@ namespace Agreely\Sdk\Test\Contract;
  * `scripts/sdk-contract-seed.php` (run in the api container) and written to
  * test/Contract/fixture.json, the SAME seed + the SAME golden vectors the TS SDK
  * uses, which is what makes this the cross-SDK anti-drift gate.
+ *
+ * The 0.5.0 surface needs keys the seed does not mint yet ('attest', 'withdraw',
+ * 'registry', 'holds'). Add them under `keys` with those names; a test whose key is
+ * absent skips rather than fails ({@see Fixture::keyOrNull()}).
  */
 final class Fixture
 {
@@ -51,6 +55,14 @@ final class Fixture
         /** @var array<string,string> $keys */
         $keys = $this->data['keys'];
         return $keys[$name];
+    }
+
+    /** The key minted for $name, or null when the fixture does not carry one. */
+    public function keyOrNull(string $name): ?string
+    {
+        $keys = $this->data['keys'] ?? null;
+        $key = is_array($keys) ? ($keys[$name] ?? null) : null;
+        return is_string($key) && $key !== '' ? $key : null;
     }
 
     public function subject(): string
