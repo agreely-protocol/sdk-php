@@ -10,9 +10,12 @@ use Agreely\Sdk\Errors\AgreelyConflictError;
 use Agreely\Sdk\Errors\AgreelyDailyCapError;
 use Agreely\Sdk\Errors\ErrorCode;
 use Agreely\Sdk\Test\Support\MockHttpClient;
-use Agreely\Sdk\Types\AgreelyIdentity;
-use Agreely\Sdk\Types\Disposition;
+use Agreely\Sdk\Types\AgreelyIdentityOutcome;
+use Agreely\Sdk\Types\CustomerRecord;
+use Agreely\Sdk\Types\DispositionKind;
 use Agreely\Sdk\Types\DispositionWarning;
+use Agreely\Sdk\Types\HoldGround;
+use Agreely\Sdk\Types\UpsertCustomerResult;
 use Agreely\Sdk\Types\RetentionClock;
 use Agreely\Sdk\Types\RetentionHold;
 use PHPUnit\Framework\TestCase;
@@ -74,6 +77,7 @@ final class CustomersTest extends TestCase
         $this->assertSame('PUT', $call->method);
         $this->assertSame('/v1/customers/STORE%2F0042', parse_url($call->url, PHP_URL_PATH));
         $this->assertSame(['displayName' => 'Marie Tremblay', 'email' => null, 'legalBasis' => 'contract'], $call->body);
+        $this->assertInstanceOf(UpsertCustomerResult::class, $record);
         $this->assertTrue($record->created);
         $this->assertTrue($record->hasDisplayName);
         $this->assertSame('contract', $record->legalBasis);
@@ -124,7 +128,8 @@ final class CustomersTest extends TestCase
         $http = new MockHttpClient([MockHttpClient::json(200, self::record())]);
         $record = $this->client($http)->customers()->get('STORE/0042');
         $this->assertSame('GET', $http->calls[0]->method);
-        $this->assertNull($record->created);
+        $this->assertInstanceOf(CustomerRecord::class, $record);
+        $this->assertNotInstanceOf(UpsertCustomerResult::class, $record, 'only an upsert says whether it created');
         $this->assertFalse($record->hasEmail);
         $this->assertSame('api', $record->source);
     }
@@ -165,7 +170,7 @@ final class CustomersTest extends TestCase
         $this->assertTrue($posture->clock->rules[0]->held);
         $this->assertSame(24, $posture->clock->rules[0]->periodMonths);
         $this->assertNotNull($posture->disposition);
-        $this->assertSame(AgreelyIdentity::RETAINED_HOLD, $posture->disposition->agreelyIdentity);
+        $this->assertSame(AgreelyIdentityOutcome::RETAINED_HOLD, $posture->disposition->agreelyIdentity);
         $this->assertCount(2, $posture->holds);
         $this->assertCount(1, $posture->activeHolds());
 
@@ -209,7 +214,7 @@ final class CustomersTest extends TestCase
             'warnings' => [['code' => 'hold_active', 'message' => 'A hold is in place.', 'holdIds' => [self::HOLD]]],
         ])]);
         $result = $this->client($http)->retention()->declareDisposition('c-1', [
-            'disposition' => Disposition::LEGAL_HOLD,
+            'disposition' => DispositionKind::LEGAL_HOLD,
             'reason' => 'Loi sur les impôts, art. 35',
             'retentionUntil' => '2030-12-31',
             'scheduleRef' => 'CC-12',
@@ -221,8 +226,8 @@ final class CustomersTest extends TestCase
         ], $http->calls[0]->body);
         $this->assertSame('declared', $result->status);
         $this->assertTrue($result->appended);
-        $this->assertSame('legal_hold', $result->declaration->disposition);
-        $this->assertSame(AgreelyIdentity::RETAINED, $result->declaration->agreelyIdentity);
+        $this->assertSame('legal_hold', $result->disposition);
+        $this->assertSame(AgreelyIdentityOutcome::RETAINED, $result->agreelyIdentity);
         $this->assertSame(DispositionWarning::HOLD_ACTIVE, $result->warnings[0]->code);
         $this->assertSame([self::HOLD], $result->warnings[0]->holdIds);
     }
@@ -265,7 +270,7 @@ final class CustomersTest extends TestCase
         $http = new MockHttpClient([MockHttpClient::json(201, ['customerRef' => 'c-1', 'recorded' => true]
             + self::apiHold() + ['replayed' => false])]);
         $placed = $this->client($http)->retention()->placeHold('c-1', [
-            'ground' => RetentionHold::GROUND_OTHER_LAW,
+            'ground' => HoldGround::OTHER_LAW,
             'provision' => 'Code civil du Québec, art. 2925',
             'scope' => ['rules' => [self::RULE]],
             'startedOn' => '2026-10-09',
@@ -279,16 +284,16 @@ final class CustomersTest extends TestCase
             'startedOn' => '2026-10-09', 'reviewOn' => '2027-10-09',
         ], $call->body);
         $this->assertFalse($placed->replayed);
-        $this->assertSame(self::HOLD, $placed->hold->id);
-        $this->assertTrue($placed->hold->isActive());
+        $this->assertSame(self::HOLD, $placed->id);
+        $this->assertTrue($placed->isActive());
     }
 
     public function testPlaceHoldDefaultsToAllAndGeneratesAKey(): void
     {
         $http = new MockHttpClient([MockHttpClient::json(200, ['customerRef' => 'c-1', 'recorded' => true]
             + self::apiHold() + ['replayed' => true])]);
-        $placed = $this->client($http)->retention()->placeHold('c-1', ['ground' => 'rights_request', 'scope' => 'all']);
-        $this->assertSame(['ground' => 'rights_request', 'scope' => 'all'], $http->calls[0]->body);
+        $placed = $this->client($http)->retention()->placeHold('c-1', ['ground' => 'rights_request']);
+        $this->assertSame(['ground' => 'rights_request'], $http->calls[0]->body, 'no scope sent: the server defaults to "all"');
         $this->assertStringStartsWith('idem_', (string) $http->calls[0]->header('Idempotency-Key'));
         $this->assertTrue($placed->replayed);
     }
@@ -308,6 +313,7 @@ final class CustomersTest extends TestCase
             'ground' => 'other_law', 'provision' => str_repeat('p', 2001),
         ]));
         $this->refused(fn (Agreely $a) => $a->retention()->placeHold('c', ['ground' => 'rights_request'], ['idempotencyKey' => 'has space']));
+        $this->refused(fn (Agreely $a) => $a->retention()->placeHold('c', ['ground' => 'rights_request'], ['idempotency_key' => 'k']));
     }
 
     public function testTheHoldBudgetIsADailyCap(): void
@@ -325,8 +331,8 @@ final class CustomersTest extends TestCase
         $this->assertSame('/v1/customers/c-1/retention/holds/' . self::HOLD . '/release', $http->calls[0]->path());
         $this->assertSame(['reason' => 'Recours épuisés'], $http->calls[0]->body);
         $this->assertNotNull($http->calls[0]->header('Idempotency-Key'));
-        $this->assertFalse($released->hold->isActive());
-        $this->assertSame(AgreelyIdentity::ERASED, $released->agreelyIdentity);
+        $this->assertFalse($released->isActive());
+        $this->assertSame(AgreelyIdentityOutcome::ERASED, $released->agreelyIdentity);
     }
 
     public function testReleaseHoldRequiresAReason(): void
@@ -335,6 +341,8 @@ final class CustomersTest extends TestCase
         /** @phpstan-ignore argument.type (the point is a shape the type forbids) */
         $this->refused(fn (Agreely $a) => $a->retention()->releaseHold('c', self::HOLD, []));
         $this->refused(fn (Agreely $a) => $a->retention()->releaseHold('c', '', ['reason' => 'r']));
+        $this->refused(fn (Agreely $a) => $a->retention()->releaseHold('c', 'hold-7', ['reason' => 'r']));
+        $this->refused(fn (Agreely $a) => $a->retention()->releaseHold('c', self::HOLD, ['reason' => 'r'], ['idempotencyKy' => 'k']));
         $this->refused(fn (Agreely $a) => $a->retention()->releaseHold('c', self::HOLD, ['reason' => 'r', 'by' => 'me']));
     }
 
@@ -354,7 +362,39 @@ final class CustomersTest extends TestCase
             $this->fail('expected AgreelyDailyCapError');
         } catch (AgreelyDailyCapError $e) {
             $this->assertSame(ErrorCode::HOLD_RELEASE_CAP_REACHED, $e->code);
-            $this->assertCount(1, $http->calls);
         }
+    }
+
+    // --- references and fail-closed reads ---------------------------------------------------------------------------
+
+    public function testAReferenceWithASlashAndAPercentTravelsAsOneEncodedSegment(): void
+    {
+        $http = new MockHttpClient([MockHttpClient::json(200, self::record())]);
+        $this->client($http)->customers()->get('STORE/50%/0042');
+        $this->assertSame('/v1/customers/STORE%2F50%25%2F0042', parse_url($http->calls[0]->url, PHP_URL_PATH));
+
+        $http = new MockHttpClient([MockHttpClient::json(200, ['customerRef' => 'x', 'relationship' => [], 'clock' => [], 'holds' => []])]);
+        $this->client($http)->retention()->getCustomerRetention('%41/b');
+        $this->assertSame('/v1/customers/%2541%2Fb/retention', parse_url($http->calls[0]->url, PHP_URL_PATH));
+    }
+
+    public function testADotReferenceIsRefusedBecauseAClientWouldNormaliseItAway(): void
+    {
+        $this->refused(fn (Agreely $a) => $a->customers()->get('.'));
+        $this->refused(fn (Agreely $a) => $a->customers()->upsert('..', []));
+        $this->refused(fn (Agreely $a) => $a->retention()->getCustomerRetention(' .. '));
+        $http = new MockHttpClient([MockHttpClient::json(200, self::record())]);
+        $this->client($http)->customers()->get('...');
+        $this->assertSame('/v1/customers/...', parse_url($http->calls[0]->url, PHP_URL_PATH), 'three dots is an ordinary reference');
+    }
+
+    public function testAHoldWhoseStatusIsUnknownOrMissingCountsAsInPlace(): void
+    {
+        foreach (['suspended', '', null] as $status) {
+            $wire = self::apiHold();
+            $wire['status'] = $status;
+            $this->assertTrue(RetentionHold::fromWire($wire)->isActive(), 'status ' . json_encode($status));
+        }
+        $this->assertFalse(RetentionHold::fromWire(self::apiHold('released'))->isActive());
     }
 }

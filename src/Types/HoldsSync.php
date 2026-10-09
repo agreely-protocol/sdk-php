@@ -17,7 +17,7 @@ final class HoldsSync
     public const MODE_SNAPSHOT = 'snapshot';
     public const MODE_DELTA    = 'delta';
 
-    /** @param list<HoldFeedEntry> $holds */
+    /** @param list<RetentionHoldFeedItem> $holds */
     public function __construct(
         public readonly string $mode,
         public readonly array $holds,
@@ -28,10 +28,10 @@ final class HoldsSync
     /**
      * The holds still in force in this sync, for a purge job to skip.
      *
-     * @return list<HoldFeedEntry>
+     * @return list<RetentionHoldFeedItem>
      */
     public function active(): array
     {
-        return array_values(array_filter($this->holds, static fn (HoldFeedEntry $h): bool => $h->isActive()));
+        return array_values(array_filter($this->holds, static fn (RetentionHoldFeedItem $h): bool => $h->isActive()));
     }
 }

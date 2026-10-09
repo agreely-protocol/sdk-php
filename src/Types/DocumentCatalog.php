@@ -6,18 +6,21 @@ namespace Agreely\Sdk\Types;
 
 /**
  * GET /v1/catalog narrowed to ONE published consent document: the tenant's regime, the
- * document it was narrowed to (its stable `documentCode` and the `documentVersionId`
- * POST /v1/manual-consents requires), and that document's ACTIVE cells. One call serves
- * both building an intake form and recording the consent it collects.
+ * document it was narrowed to (`document['code']`, its stable code, and
+ * `document['documentVersionId']`, what the consent writes take), and that document's
+ * ACTIVE cells in `catalog`. One call serves both building an intake form and recording
+ * the consent it collects.
  */
 final class DocumentCatalog
 {
-    /** @param list<CatalogEntry> $entries */
+    /**
+     * @param array{code:string,documentVersionId:string} $document
+     * @param list<CatalogEntry> $catalog
+     */
     public function __construct(
         public readonly ?Regime $regime,
-        public readonly string $documentCode,
-        public readonly string $documentVersionId,
-        public readonly array $entries,
+        public readonly array $document,
+        public readonly array $catalog,
     ) {
     }
 
@@ -27,8 +30,10 @@ final class DocumentCatalog
         $document = Wire::object($wire, 'document') ?? [];
         return new self(
             Regime::fromWireMember($wire, 'regime'),
-            Wire::str($document['code'] ?? null),
-            Wire::str($document['documentVersionId'] ?? null),
+            [
+                'code' => Wire::str($document['code'] ?? null),
+                'documentVersionId' => Wire::str($document['documentVersionId'] ?? null),
+            ],
             array_map(CatalogEntry::fromWire(...), Wire::objects($wire, 'catalog')),
         );
     }

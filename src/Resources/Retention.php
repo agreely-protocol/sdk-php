@@ -14,14 +14,14 @@ use Agreely\Sdk\Http\RequestSpec;
 use Agreely\Sdk\Http\Transport;
 use Agreely\Sdk\IdempotencyKey;
 use Agreely\Sdk\Types\CustomerRetention;
-use Agreely\Sdk\Types\Disposition;
-use Agreely\Sdk\Types\DispositionDeclaration;
-use Agreely\Sdk\Types\HoldFeedPage;
+use Agreely\Sdk\Types\DeclaredDisposition;
+use Agreely\Sdk\Types\DispositionKind;
+use Agreely\Sdk\Types\HoldGround;
 use Agreely\Sdk\Types\HoldsSync;
 use Agreely\Sdk\Types\PlacedHold;
 use Agreely\Sdk\Types\PurgeDeclaration;
 use Agreely\Sdk\Types\ReleasedHold;
-use Agreely\Sdk\Types\RetentionHold;
+use Agreely\Sdk\Types\RetentionHoldPage;
 use Agreely\Sdk\Types\PurgeMethod;
 use Agreely\Sdk\Types\RetentionRule;
 use Agreely\Sdk\Types\RetentionRuleDetail;
@@ -43,12 +43,13 @@ use Generator;
  * purges, and DECLARES them. Agreely observes nothing in the host's systems and
  * verifies none of it: every write answers `status: "declared"`, never "verified".
  *
- * Neither declaration is ever auto-retried, and both REQUIRE an Idempotency-Key
- * passed in the $options argument, because it travels as a HEADER. Putting it in the
- * body is refused client-side rather than silently dropped
- * ({@see HostInput::closed()}), and the digest the server stores is BOUND TO THE API
- * KEY that declared: replaying a declaration after rotating the key records a SECOND
- * declaration, so settle every pending declaration with the old key before revoking it.
+ * No write here is ever auto-retried, and every Idempotency-Key travels in the $options
+ * argument, because it is a HEADER: putting it in the body is refused client-side rather
+ * than silently dropped ({@see HostInput::closed()}). The purge and pass declarations
+ * REQUIRE one, and the digest the server stores is BOUND TO THE API KEY that declared:
+ * replaying a declaration after rotating the key records a SECOND declaration, so settle
+ * every pending declaration with the old key before revoking it. placeHold() and
+ * releaseHold() generate one per call unless you pass your own.
  */
 final class Retention
 {
@@ -321,7 +322,7 @@ final class Retention
      *
      * @param array{changedSince?:string|null,pageToken?:string|null} $input
      */
-    public function listHolds(array $input = []): HoldFeedPage
+    public function listHolds(array $input = []): RetentionHoldPage
     {
         $label = 'retention.listHolds';
         HostInput::closed($input, ['changedSince', 'pageToken'], $label);
@@ -339,38 +340,49 @@ final class Retention
             ],
             idempotentRetry: true,
         ));
-        return HoldFeedPage::fromWire($wire);
+        return RetentionHoldPage::fromWire($wire);
     }
 
     /**
-     * Every PAGE of one sync, following `nextPageToken` for you, as a Generator. The LAST
-     * page carries `cursor`. Bounded by `maxPages` (default 1000 pages, 500,000 holds).
-     * Most jobs want {@see Retention::syncHolds()}, which collects the pages and refuses a
-     * partial feed.
+     * Every PAGE of one sync, following `nextPageToken` for you, as a Generator, for a job
+     * that streams the held set into its own store. The LAST page carries `cursor`.
+     * Bounded by `maxPages` (default 1000 pages, 500,000 holds).
+     *
+     * 🔴 It THROWS AgreelyConfigError, after the pages already yielded, when the feed does
+     * not reach its last page within `maxPages` or when a last page carries no cursor, and
+     * any API error throws too. So record what a page holds as you go, but purge NOTHING
+     * until the loop has ended without a throw. Most jobs want
+     * {@see Retention::syncHolds()}, which collects the pages first.
      *
      *   foreach ($agreely->retention()->holdPages(['changedSince' => $stored]) as $page) { ... }
      *
      * @param array{changedSince?:string|null,maxPages?:int} $input
-     * @return Generator<int, HoldFeedPage>
+     * @return Generator<int, RetentionHoldPage>
      */
     public function holdPages(array $input = []): Generator
     {
-        HostInput::closed($input, ['changedSince', 'maxPages'], 'retention.holdPages');
+        $label = 'retention.holdPages';
+        HostInput::closed($input, ['changedSince', 'maxPages'], $label);
         $maxPages = isset($input['maxPages']) && is_int($input['maxPages']) && $input['maxPages'] > 0
             ? $input['maxPages']
             : self::HOLDS_MAX_PAGES;
-        $changedSince = $input['changedSince'] ?? null;
+        $changedSince = self::changedSince($input);
         $pageToken = null;
         for ($page = 0; $page < $maxPages; $page++) {
             $result = $this->listHolds($pageToken === null
                 ? ['changedSince' => $changedSince]
                 : ['pageToken' => $pageToken]);
+            if ($result->isLast() && ($result->cursor === null || $result->cursor === '')) {
+                // Neither a next page nor a cursor: the feed did not say it ended.
+                throw self::partialFeed($label);
+            }
             yield $result;
             if ($result->isLast()) {
                 return;
             }
             $pageToken = $result->nextPageToken;
         }
+        throw self::partialFeed($label);
     }
 
     /**
@@ -379,32 +391,29 @@ final class Retention
      *
      *   mode "snapshot" (no changedSince) REPLACES your whole active set
      *   mode "delta"    (changedSince)    every hold placed or released since, with its status
-     * Delivery is AT LEAST ONCE: upsert by id.
+     * Delivery is AT LEAST ONCE: upsert by id. An empty changedSince is a snapshot.
      *
      * 🔴 FAIL CLOSED: purge only after this returns. Any error (401, 403, 402, a 5xx, a
      * timeout) THROWS, and a purge job treats it as "do not purge this run" and stores no
-     * cursor. Reading `maxPages` pages without reaching the last one throws
-     * AgreelyConfigError rather than returning a partial feed: an incomplete held set
-     * read as complete would let a purge destroy what a hold keeps.
+     * cursor. A feed that does not reach its last page within `maxPages`, or whose last
+     * page carries no cursor, throws AgreelyConfigError rather than return a partial
+     * feed: an incomplete held set read as complete would let a purge destroy what a hold
+     * keeps.
      *
      * @param array{changedSince?:string|null,maxPages?:int} $input
      */
     public function syncHolds(array $input = []): HoldsSync
     {
         $holds = [];
+        $cursor = '';
         foreach ($this->holdPages($input) as $page) {
             foreach ($page->holds as $hold) {
                 $holds[] = $hold;
             }
-            if ($page->cursor !== null && $page->cursor !== '') {
-                $mode = ($input['changedSince'] ?? null) !== null ? HoldsSync::MODE_DELTA : HoldsSync::MODE_SNAPSHOT;
-                return new HoldsSync($mode, $holds, $page->cursor);
-            }
+            $cursor = (string) $page->cursor;
         }
-        throw new AgreelyConfigError(
-            'retention.syncHolds stopped before the last page of the holds feed (no cursor), so the held set is '
-            . 'INCOMPLETE. Purge nothing this run; raise maxPages if your organisation genuinely holds that many.',
-        );
+        $mode = self::changedSince($input) === null ? HoldsSync::MODE_SNAPSHOT : HoldsSync::MODE_DELTA;
+        return new HoldsSync($mode, $holds, $cursor);
     }
 
     /**
@@ -432,7 +441,7 @@ final class Retention
     /**
      * DECLARE what your system did with one customer's information once the relationship
      * ENDED (POST /v1/customers/{customerRef}/retention/dispositions, scope 'registry'): "destroyed",
-     * "anonymized" or "legal_hold" ({@see Disposition}).
+     * "anonymized" or "legal_hold" ({@see DispositionKind}).
      *
      * - reason          REQUIRED for legal_hold: name the law that imposes the delay. At
      *                   most 2000 characters, encrypted, never echoed.
@@ -449,23 +458,23 @@ final class Retention
      * 🔴 IRREVERSIBLE SIDE EFFECT. An appended destroyed or anonymized declaration removes
      * the name, email, basis note and notice language Agreely holds for this customer, in
      * the same transaction, unless an active hold on ALL the information keeps them. Read
-     * `declaration->agreelyIdentity` ({@see \Agreely\Sdk\Types\AgreelyIdentity}).
+     * `agreelyIdentity` on the answer ({@see \Agreely\Sdk\Types\AgreelyIdentityOutcome}).
      *
      * NEVER auto-retried.
      *
      * @param array{disposition:string,reason?:string,retentionUntil?:string,scheduleRef?:string} $input
      */
-    public function declareDisposition(string $customerRef, array $input): DispositionDeclaration
+    public function declareDisposition(string $customerRef, array $input): DeclaredDisposition
     {
         $label = 'retention.declareDisposition';
         $ref = HostInput::customerRef($customerRef, $label);
         HostInput::closed($input, self::DISPOSITION_MEMBERS, $label);
 
         $disposition = $input['disposition'] ?? null;
-        if (!is_string($disposition) || !in_array($disposition, Disposition::ALL, true)) {
-            throw new AgreelyConfigError("{$label}: disposition must be one of " . implode(', ', Disposition::ALL) . '.');
+        if (!is_string($disposition) || !in_array($disposition, DispositionKind::ALL, true)) {
+            throw new AgreelyConfigError("{$label}: disposition must be one of " . implode(', ', DispositionKind::ALL) . '.');
         }
-        $isHold = $disposition === Disposition::LEGAL_HOLD;
+        $isHold = $disposition === DispositionKind::LEGAL_HOLD;
         $body = ['disposition' => $disposition];
 
         $reason = self::optionalText($input, 'reason', self::HOLD_TEXT_MAX, $label);
@@ -497,7 +506,7 @@ final class Retention
             body: $body,
             idempotentRetry: false,
         ));
-        return DispositionDeclaration::fromWire($wire);
+        return DeclaredDisposition::fromWire($wire);
     }
 
     /**
@@ -530,21 +539,22 @@ final class Retention
         $label = 'retention.placeHold';
         $ref = HostInput::customerRef($customerRef, $label);
         HostInput::closed($input, self::HOLD_MEMBERS, $label);
+        HostInput::closed($options, ['idempotencyKey'], $label);
 
         $ground = $input['ground'] ?? null;
-        if ($ground !== RetentionHold::GROUND_RIGHTS_REQUEST && $ground !== RetentionHold::GROUND_OTHER_LAW) {
+        if (!is_string($ground) || !in_array($ground, HoldGround::ALL, true)) {
             throw new AgreelyConfigError("{$label}: ground must be \"rights_request\" or \"other_law\".");
         }
         $body = ['ground' => $ground];
 
         $provision = self::optionalText($input, 'provision', self::HOLD_TEXT_MAX, $label);
-        if ($ground === RetentionHold::GROUND_OTHER_LAW && $provision === null) {
+        if ($ground === HoldGround::OTHER_LAW && $provision === null) {
             throw new AgreelyConfigError(
                 "{$label}: an \"other_law\" hold requires a provision naming the law that requires the information "
                 . 'to be kept.',
             );
         }
-        if ($ground === RetentionHold::GROUND_RIGHTS_REQUEST && $provision !== null) {
+        if ($ground === HoldGround::RIGHTS_REQUEST && $provision !== null) {
             throw new AgreelyConfigError("{$label}: a provision applies only to an \"other_law\" hold.");
         }
         if ($provision !== null) {
@@ -594,8 +604,9 @@ final class Retention
     {
         $label = 'retention.releaseHold';
         $ref = HostInput::customerRef($customerRef, $label);
-        $hold = HostInput::pathKey($holdId, $label, 'holdId');
+        $hold = HostInput::uuid($holdId, "{$label}: holdId");
         HostInput::closed($input, ['reason'], $label);
+        HostInput::closed($options, ['idempotencyKey'], $label);
         $reason = self::optionalText($input, 'reason', self::HOLD_TEXT_MAX, $label);
         if ($reason === null) {
             throw new AgreelyConfigError("{$label} requires a reason: lifting a hold is a motivated act.");
@@ -677,6 +688,27 @@ final class Retention
             );
         }
         return $out;
+    }
+
+    /**
+     * The sync's changedSince: null for a snapshot, an empty string included (the server
+     * reads an empty one as absent, so it must not be reported as a delta).
+     *
+     * @param array<string,mixed> $input
+     */
+    private static function changedSince(array $input): ?string
+    {
+        $value = $input['changedSince'] ?? null;
+        return is_string($value) && $value !== '' ? $value : null;
+    }
+
+    /** The refusal of a feed that did not provably end: never act on a partial held set. */
+    private static function partialFeed(string $label): AgreelyConfigError
+    {
+        return new AgreelyConfigError(
+            "{$label}: the holds feed did not reach a last page carrying a cursor, so the held set is INCOMPLETE. "
+            . 'Purge nothing this run; raise maxPages if your organisation genuinely holds that many.',
+        );
     }
 
     /**

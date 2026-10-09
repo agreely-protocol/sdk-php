@@ -12,7 +12,7 @@ namespace Agreely\Sdk\Types;
  *
  * Delivery is AT LEAST ONCE: upsert by `id`. In a delta sync a row may be "released".
  */
-final class HoldFeedEntry
+final class RetentionHoldFeedItem
 {
     public function __construct(
         public readonly string $id,
@@ -35,8 +35,13 @@ final class HoldFeedEntry
         );
     }
 
+    /**
+     * FAIL CLOSED: a row counts as a hold in place unless it says "released". A status
+     * this client does not know, or a missing one, keeps the information rather than let
+     * a purge destroy it.
+     */
     public function isActive(): bool
     {
-        return $this->status === RetentionHold::STATUS_ACTIVE;
+        return $this->status !== RetentionHold::STATUS_RELEASED;
     }
 }

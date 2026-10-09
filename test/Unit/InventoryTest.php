@@ -156,6 +156,21 @@ final class InventoryTest extends TestCase
         }
     }
 
+    public function testExactlyTwoHundredRecordSetsAreSent(): void
+    {
+        $http = new MockHttpClient([MockHttpClient::json(200, ['hostSystem' => 'crm', 'withdrawn' => 0, 'categories' => []])]);
+        $input = ['hostSystem' => 'crm', 'categories' => []];
+        for ($i = 0; $i < Inventory::MAX_SETS; $i++) {
+            $input['categories'][] = ['key' => 'set-' . $i, 'label' => 'Set ' . $i, 'fields' => [['key' => 'f', 'label' => 'Field']]];
+        }
+        $this->replace($http, $input);
+        $this->assertCount(1, $http->calls);
+        $body = $http->calls[0]->body;
+        $this->assertNotNull($body);
+        $this->assertIsArray($body['categories']);
+        $this->assertCount(200, $body['categories']);
+    }
+
     public function testMoreThanTwoHundredRecordSetsIsRefused(): void
     {
         $http = new MockHttpClient([MockHttpClient::json(200, [])]);

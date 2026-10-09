@@ -7,14 +7,14 @@ namespace Agreely\Sdk;
 use Agreely\Sdk\Errors\AgreelyConfigError;
 
 /**
- * The client-side guards the host-retention and inventory surfaces need, ported
- * from the TS SDK's util.ts. Pure, side-effect-free static helpers: every one of
- * them refuses BEFORE a wire call, so a cron discovers a bad slug or a stale
- * instant on the spot instead of as a 422 at 3am.
+ * The client-side input guards every resource shares, the twin of the TS SDK's util.ts:
+ * closed input shapes, path segments (customer references, uuids, keys), host tokens,
+ * instants, calendar days, locales and the render budget of a PDF call. Pure,
+ * side-effect-free static helpers: every one of them refuses BEFORE a wire call, so a
+ * cron discovers a bad slug or a stale instant on the spot instead of as a 422 at 3am.
  *
  * The server stays the authority. These only save a round trip, and they are
- * deliberately the same rules the server enforces (see HostReportInput and
- * InventoryInput on the API side).
+ * deliberately the same rules the server enforces.
  */
 final class HostInput
 {
@@ -141,14 +141,19 @@ final class HostInput
 
     /**
      * The company's OWN customer reference (the ref /v1/check takes), never a DID: 1 to
-     * 200 characters once trimmed, as the server bounds it. A "/" in it is fine (it is
-     * percent-encoded into ONE path segment).
+     * 200 characters once trimmed with PHP's trim(), exactly as the server trims and
+     * bounds it. A "/" or a "%" in it is fine: it is percent-encoded into ONE path
+     * segment. "." and ".." are refused, because an HTTP client or proxy normalises such
+     * a segment away and the call would reach a different route.
      */
     public static function customerRef(mixed $value, string $method): string
     {
         $ref = is_string($value) ? trim($value) : '';
         if ($ref === '' || mb_strlen($ref) > 200) {
             throw new AgreelyConfigError("{$method} requires a customerRef of 1 to 200 characters.");
+        }
+        if ($ref === '.' || $ref === '..') {
+            throw new AgreelyConfigError("{$method}: a customerRef of \".\" or \"..\" cannot travel as a path segment.");
         }
         return $ref;
     }
@@ -182,12 +187,12 @@ final class HostInput
         return $timeout;
     }
 
-    /** A uuid path segment (a documentVersionId), refused client-side when it is not one. */
+    /** A uuid path segment (a documentVersionId, a holdId), refused client-side when it is not one: the server answers 404. */
     public static function uuid(mixed $value, string $label): string
     {
         $id = is_string($value) ? strtolower(trim($value)) : '';
         if (preg_match('/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/D', $id) !== 1) {
-            throw new AgreelyConfigError("{$label} must be a uuid, as documentVersionId reads in consentDocuments()->list().");
+            throw new AgreelyConfigError("{$label} must be a uuid.");
         }
         return $id;
     }

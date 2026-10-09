@@ -18,10 +18,11 @@ namespace Agreely\Sdk\Types;
  *   registered  whether an identity row is held at all. False for a reference Agreely
  *               knows only from consent history.
  *   source      the FIRST entry route: manual | import | api | ceremony (null when not registered)
- *   created     on upsert(): true when this call created the identity row (201), false
- *               when it merged into an existing one (200). Null on get().
+ *
+ * Not final: {@see UpsertCustomerResult} extends it with `created`, as the TypeScript
+ * twin's interface does.
  */
-final class CustomerRecord
+class CustomerRecord
 {
     public function __construct(
         public readonly string $customerRef,
@@ -35,26 +36,36 @@ final class CustomerRecord
         public readonly ?string $createdAt,
         public readonly ?string $updatedAt,
         public readonly RelationshipState $relationship,
-        public readonly ?bool $created = null,
     ) {
     }
 
     /** @param array<string,mixed> $wire */
-    public static function fromWire(array $wire, ?bool $created = null): self
+    public static function fromWire(array $wire): self
     {
-        return new self(
-            Wire::str($wire['customerRef'] ?? null),
-            Wire::bool($wire['registered'] ?? false),
-            Wire::nullableStr($wire['source'] ?? null),
-            Wire::bool($wire['hasDisplayName'] ?? false),
-            Wire::bool($wire['hasEmail'] ?? false),
-            Wire::bool($wire['hasBasisNote'] ?? false),
-            Wire::nullableStr($wire['legalBasis'] ?? null),
-            Wire::nullableStr($wire['noticeLocale'] ?? null),
-            Wire::nullableStr($wire['createdAt'] ?? null),
-            Wire::nullableStr($wire['updatedAt'] ?? null),
-            RelationshipState::fromWire(Wire::object($wire, 'relationship')),
-            $created,
-        );
+        return new self(...self::wireArgs($wire));
+    }
+
+    /**
+     * The record's members, read off the wire, as the named arguments of the
+     * constructor, so a subclass reads them the same way.
+     *
+     * @param array<string,mixed> $wire
+     * @return array{customerRef:string,registered:bool,source:?string,hasDisplayName:bool,hasEmail:bool,hasBasisNote:bool,legalBasis:?string,noticeLocale:?string,createdAt:?string,updatedAt:?string,relationship:RelationshipState}
+     */
+    protected static function wireArgs(array $wire): array
+    {
+        return [
+            'customerRef' => Wire::str($wire['customerRef'] ?? null),
+            'registered' => Wire::bool($wire['registered'] ?? false),
+            'source' => Wire::nullableStr($wire['source'] ?? null),
+            'hasDisplayName' => Wire::bool($wire['hasDisplayName'] ?? false),
+            'hasEmail' => Wire::bool($wire['hasEmail'] ?? false),
+            'hasBasisNote' => Wire::bool($wire['hasBasisNote'] ?? false),
+            'legalBasis' => Wire::nullableStr($wire['legalBasis'] ?? null),
+            'noticeLocale' => Wire::nullableStr($wire['noticeLocale'] ?? null),
+            'createdAt' => Wire::nullableStr($wire['createdAt'] ?? null),
+            'updatedAt' => Wire::nullableStr($wire['updatedAt'] ?? null),
+            'relationship' => RelationshipState::fromWire(Wire::object($wire, 'relationship')),
+        ];
     }
 }

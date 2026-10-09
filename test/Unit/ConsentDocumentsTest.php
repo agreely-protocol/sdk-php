@@ -77,6 +77,13 @@ final class ConsentDocumentsTest extends TestCase
         $this->assertNull($doc->disclosure->purpose->text('en'), 'never falls back to the other language');
         $this->assertSame('Write to the officer', $doc->disclosure->withdrawal->en);
         $this->assertNull($doc->disclosure->rights->fr, 'an absent section reads as unwritten');
+        try {
+            $doc->disclosure->purpose->text('de');
+            $this->fail('expected AgreelyConfigError');
+        } catch (AgreelyConfigError) {
+            $this->addToAssertionCount(1); // a locale other than fr or en is refused, never read as French
+        }
+        $this->assertInstanceOf(\Agreely\Sdk\Types\ConsentDocumentSummary::class, $doc);
         $this->assertSame('Julie Tremblay', $doc->responsable['name']);
         $this->assertTrue($doc->profiling->declared);
         $this->assertFalse($doc->automatedDecision->declared);
@@ -185,12 +192,12 @@ final class ConsentDocumentsTest extends TestCase
         $catalog = $this->client($http)->catalog()->forDocument('conditions-marketing');
         $this->assertSame('documentCode=conditions-marketing', $http->calls[0]->query());
         $this->assertSame('/v1/catalog', $http->calls[0]->path());
-        $this->assertSame(self::VERSION, $catalog->documentVersionId);
-        $this->assertSame('conditions-marketing', $catalog->documentCode);
+        $this->assertSame(self::VERSION, $catalog->document['documentVersionId']);
+        $this->assertSame('conditions-marketing', $catalog->document['code']);
         $this->assertNotNull($catalog->regime);
         $this->assertSame(Regime::SECTOR_PUBLIC, $catalog->regime->sector);
-        $this->assertSame('consent', $catalog->entries[0]->legalBasis);
-        $this->assertFalse($catalog->entries[0]->sensitive);
+        $this->assertSame('consent', $catalog->catalog[0]->legalBasis);
+        $this->assertFalse($catalog->catalog[0]->sensitive);
     }
 
     public function testIdentityCarriesTheOrganisationItDiscovers(): void

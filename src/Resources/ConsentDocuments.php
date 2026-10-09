@@ -8,8 +8,8 @@ use Agreely\Sdk\Errors\AgreelyUnavailableError;
 use Agreely\Sdk\HostInput;
 use Agreely\Sdk\Http\RequestSpec;
 use Agreely\Sdk\Http\Transport;
-use Agreely\Sdk\Types\ConsentDocument;
 use Agreely\Sdk\Types\ConsentDocumentDetail;
+use Agreely\Sdk\Types\ConsentDocumentSummary;
 use Agreely\Sdk\Types\InformationDocument;
 use Agreely\Sdk\Types\Wire;
 
@@ -37,7 +37,7 @@ final class ConsentDocuments
     /**
      * Every published document, each with the active cells its current version groups.
      *
-     * @return list<ConsentDocument>
+     * @return list<ConsentDocumentSummary>
      */
     public function list(): array
     {
@@ -46,7 +46,7 @@ final class ConsentDocuments
             path: '/v1/consent-documents',
             idempotentRetry: true,
         ));
-        return array_map(ConsentDocument::fromWire(...), Wire::objects($wire, 'documents'));
+        return array_map(ConsentDocumentSummary::fromWire(...), Wire::objects($wire, 'documents'));
     }
 
     /**

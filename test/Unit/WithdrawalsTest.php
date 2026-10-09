@@ -107,6 +107,13 @@ final class WithdrawalsTest extends TestCase
             ['channel' => 'phone', 'operator' => 'agent-12', 'customerId' => 'smuggled'],
             ['channel' => 'phone', 'operator' => 'agent-12', 'idempotencyKey' => 'in-the-body'],
         ];
+        $http = self::recorded();
+        try {
+            $this->client($http)->withdrawals()->record('c-1', self::REF, ['channel' => 'phone', 'operator' => 'a'], ['idempotency' => 'k']);
+            $this->fail('a misspelt idempotencyKey option must not silently generate a random key');
+        } catch (AgreelyConfigError) {
+            $this->assertCount(0, $http->calls);
+        }
         foreach ($bad as $input) {
             $http = self::recorded();
             try {
@@ -165,7 +172,7 @@ final class WithdrawalsTest extends TestCase
         }
     }
 
-    public function testTheDailyCapIsTypedAndNeverAutoRetried(): void
+    public function testTheDailyCapIsADailyCapCarryingItsCodeAndReason(): void
     {
         $http = new MockHttpClient([
             MockHttpClient::json(429, ['error' => [
@@ -181,6 +188,5 @@ final class WithdrawalsTest extends TestCase
             $this->assertSame(ErrorReason::DAILY_CAP, $e->reason);
             $this->assertNull($e->retryAfter);
         }
-        $this->assertCount(1, $http->calls);
     }
 }

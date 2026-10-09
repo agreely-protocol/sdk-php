@@ -9,7 +9,7 @@ namespace Agreely\Sdk\Types;
  * snapshot frozen when the cell was grouped: what THIS version declared, which a later
  * catalog edit cannot change.
  */
-final class ConsentDocumentCell
+final class ConsentDocumentItem
 {
     public function __construct(
         public readonly string $id,

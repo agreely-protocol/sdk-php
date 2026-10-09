@@ -17,7 +17,7 @@ final class CustomerRetention
         public readonly string $customerRef,
         public readonly RelationshipState $relationship,
         public readonly RetentionClock $clock,
-        public readonly ?Disposition $disposition,
+        public readonly ?RetentionDispositionRecord $disposition,
         public readonly array $holds,
         public readonly bool $releasedTruncated,
     ) {
@@ -31,7 +31,7 @@ final class CustomerRetention
             Wire::str($wire['customerRef'] ?? null),
             RelationshipState::fromWire(Wire::object($wire, 'relationship')),
             RetentionClock::fromWire(Wire::object($wire, 'clock') ?? []),
-            $disposition === null ? null : Disposition::fromWire($disposition),
+            $disposition === null ? null : RetentionDispositionRecord::fromWire($disposition),
             RetentionHold::listFromWire(Wire::objects($wire, 'holds')),
             Wire::bool($wire['releasedTruncated'] ?? false),
         );

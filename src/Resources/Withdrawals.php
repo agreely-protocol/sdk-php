@@ -10,6 +10,7 @@ use Agreely\Sdk\Http\RequestSpec;
 use Agreely\Sdk\Http\Transport;
 use Agreely\Sdk\IdempotencyKey;
 use Agreely\Sdk\Types\ConsentWithdrawal;
+use Agreely\Sdk\Types\WithdrawalChannel;
 
 /**
  * Record a person's WITHDRAWAL of a consent, on her behalf (scope: 'withdraw').
@@ -26,9 +27,6 @@ use Agreely\Sdk\Types\ConsentWithdrawal;
  */
 final class Withdrawals
 {
-    /** How the person asked for the withdrawal: the server's closed vocabulary. */
-    public const CHANNELS = ['phone', 'email', 'mail', 'in_person', 'other'];
-
     /** The `reason` bound, mirrored from the server. */
     public const REASON_MAX = 1000;
 
@@ -49,7 +47,8 @@ final class Withdrawals
      * Record the withdrawal of $consentRef (0x-hex) for $customerRef, the company's own
      * reference for the person (POST /v1/customers/{customerRef}/consents/{consentRef}/withdrawal).
      *
-     * - channel     REQUIRED, how the person asked: phone | email | mail | in_person | other
+     * - channel     REQUIRED, how the person asked ({@see WithdrawalChannel}): phone | email |
+     *               mail | in_person | other
      * - operator    REQUIRED, YOUR opaque id of the staff member who received the request
      *               (letters, digits, . _ : -, at most 64). Never a name, never an email.
      * - requestedAt optional, when the person asked, AS DECLARED: a DateTimeInterface or
@@ -92,11 +91,12 @@ final class Withdrawals
             throw new AgreelyConfigError("{$label}: consentRef must be the 0x-prefixed 64-hex consentRef.");
         }
         HostInput::closed($input, self::MEMBERS, $label);
+        HostInput::closed($options, ['idempotencyKey'], $label);
 
         $channel = $input['channel'] ?? null;
-        if (!is_string($channel) || !in_array($channel, self::CHANNELS, true)) {
+        if (!is_string($channel) || !in_array($channel, WithdrawalChannel::ALL, true)) {
             throw new AgreelyConfigError(
-                "{$label}: channel must be one of " . implode(', ', self::CHANNELS) . '.',
+                "{$label}: channel must be one of " . implode(', ', WithdrawalChannel::ALL) . '.',
             );
         }
         $operator = is_string($input['operator'] ?? null) ? trim($input['operator']) : '';

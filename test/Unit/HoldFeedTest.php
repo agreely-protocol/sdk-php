@@ -125,4 +125,62 @@ final class HoldFeedTest extends TestCase
             }
         }
     }
+
+    public function testAFinalPageWithNoCursorIsAPartialFeedForBothReaders(): void
+    {
+        $script = [
+            MockHttpClient::json(200, ['holds' => [self::row('1')], 'nextPageToken' => 'tok-2', 'cursor' => null]),
+            MockHttpClient::json(200, ['holds' => [self::row('2')], 'nextPageToken' => null, 'cursor' => null]),
+        ];
+        try {
+            $this->client(new MockHttpClient($script))->retention()->syncHolds();
+            $this->fail('expected AgreelyConfigError from syncHolds');
+        } catch (AgreelyConfigError $e) {
+            $this->assertStringContainsString('INCOMPLETE', $e->getMessage());
+        }
+
+        $seen = [];
+        try {
+            foreach ($this->client(new MockHttpClient($script))->retention()->holdPages() as $page) {
+                $seen[] = count($page->holds);
+            }
+            $this->fail('expected AgreelyConfigError from holdPages');
+        } catch (AgreelyConfigError $e) {
+            $this->assertStringContainsString('INCOMPLETE', $e->getMessage());
+            $this->assertSame([1], $seen, 'the cursorless last page is never yielded as a complete end');
+        }
+    }
+
+    public function testHoldPagesThrowsPastMaxPagesInsteadOfEndingQuietly(): void
+    {
+        $http = new MockHttpClient([MockHttpClient::json(200, ['holds' => [], 'nextPageToken' => 'again', 'cursor' => null])]);
+        $pages = 0;
+        try {
+            foreach ($this->client($http)->retention()->holdPages(['maxPages' => 2]) as $page) {
+                $pages++;
+            }
+            $this->fail('expected AgreelyConfigError');
+        } catch (AgreelyConfigError) {
+            $this->assertSame(2, $pages);
+        }
+    }
+
+    public function testAnEmptyChangedSinceIsASnapshot(): void
+    {
+        $http = new MockHttpClient([MockHttpClient::json(200, ['holds' => [], 'nextPageToken' => null, 'cursor' => 'c'])]);
+        $sync = $this->client($http)->retention()->syncHolds(['changedSince' => '']);
+        $this->assertSame(HoldsSync::MODE_SNAPSHOT, $sync->mode);
+        $this->assertSame('', $http->calls[0]->query());
+    }
+
+    public function testAFeedRowWhoseStatusIsUnknownOrMissingCountsAsInPlace(): void
+    {
+        $http = new MockHttpClient([MockHttpClient::json(200, ['holds' => [
+            self::row('1', 'suspended'),
+            ['id' => '2', 'customerRef' => 'c-2', 'scope' => 'all', 'changedAt' => 't'],
+            self::row('3', 'released'),
+        ], 'nextPageToken' => null, 'cursor' => 'c'])]);
+        $sync = $this->client($http)->retention()->syncHolds();
+        $this->assertSame(['1', '2'], array_map(static fn ($h) => $h->id, $sync->active()));
+    }
 }

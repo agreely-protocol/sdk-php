@@ -9,9 +9,9 @@ namespace Agreely\Sdk\Types;
  * carries `nextPageToken` (pass it back as pageToken, unchanged) and no `cursor`; the
  * LAST page carries `cursor`, the next sync's changedSince, and no token.
  */
-final class HoldFeedPage
+final class RetentionHoldPage
 {
-    /** @param list<HoldFeedEntry> $holds */
+    /** @param list<RetentionHoldFeedItem> $holds */
     public function __construct(
         public readonly array $holds,
         public readonly ?string $nextPageToken,
@@ -23,7 +23,7 @@ final class HoldFeedPage
     public static function fromWire(array $wire): self
     {
         return new self(
-            array_map(HoldFeedEntry::fromWire(...), Wire::objects($wire, 'holds')),
+            array_map(RetentionHoldFeedItem::fromWire(...), Wire::objects($wire, 'holds')),
             Wire::nullableStr($wire['nextPageToken'] ?? null),
             Wire::nullableStr($wire['cursor'] ?? null),
         );

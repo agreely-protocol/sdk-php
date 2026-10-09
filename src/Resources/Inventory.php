@@ -28,12 +28,6 @@ use Agreely\Sdk\Types\Wire;
  *                     labels stay off a 'check' key.
  *   getStatement      'inventory', 'retention' or 'check', so a public collection form
  *                     can resolve the sentence it stamps without holding a key that writes.
- *
- * 🔴 SOURCE NOTE. Unlike the retention surface, /v1/inventory/* is NOT in the committed
- * openapi.yaml as of 2026-09-25. This resource is built from the shipped
- * InventoryController and its InventoryInput parser, so its shapes are asserted against
- * an implementation rather than against a ratified contract. Treat a divergence here as
- * a question for the API, not as a bug to work around silently.
  */
 final class Inventory
 {

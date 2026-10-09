@@ -9,6 +9,7 @@ use Agreely\Sdk\HostInput;
 use Agreely\Sdk\Http\RequestSpec;
 use Agreely\Sdk\Http\Transport;
 use Agreely\Sdk\Types\CustomerRecord;
+use Agreely\Sdk\Types\UpsertCustomerResult;
 
 /**
  * ONE CUSTOMER'S REGISTRY IDENTITY (scope: 'registry'): what Agreely holds for a
@@ -19,11 +20,9 @@ use Agreely\Sdk\Types\CustomerRecord;
  *
  * Every call is addressed by ONE customerRef you already hold (your own reference, the
  * one /v1/check takes, never a DID). There is no list, by construction: no shape here
- * returns more than one person. An unknown or foreign reference is a clean
- * AgreelyNotFoundError with nothing written.
- *
- * ⚠️ DECLARED, NEVER VERIFIED. Agreely observes nothing in your systems: what a write
- * records is who declared what and when.
+ * returns more than one person. get() answers a reference this organisation never
+ * touched with AgreelyNotFoundError; upsert() CREATES the record for it (201, `created`
+ * true), and a reference another tenant uses is simply a different record in yours.
  */
 final class Customers
 {
@@ -53,8 +52,8 @@ final class Customers
      * consent flow) and noticeLocale ("fr" or "en"). No consent side effect: no email, no
      * consent request, no enforcement record.
      *
-     * The answer is metadata ({@see CustomerRecord}): `created` says whether this call
-     * created the row. After a declared destruction removed the identity, a value is a
+     * The answer is metadata ({@see UpsertCustomerResult}): `created` says whether this
+     * call created the row. After a declared destruction removed the identity, a value is a
      * 409 AgreelyConflictError code identity_erased (a clear still works); while a hold
      * on all the information keeps it, any change is a 409 identity_held.
      *
@@ -64,7 +63,7 @@ final class Customers
      *
      * @param array{displayName?:string|null,email?:string|null,basisNote?:string|null,legalBasis?:string|null,noticeLocale?:string|null} $fields
      */
-    public function upsert(string $customerRef, array $fields): CustomerRecord
+    public function upsert(string $customerRef, array $fields): UpsertCustomerResult
     {
         $label = 'customers.upsert';
         $ref = HostInput::customerRef($customerRef, $label);
@@ -101,7 +100,7 @@ final class Customers
             body: $body === [] ? null : $body,
             idempotentRetry: false,
         ));
-        return CustomerRecord::fromWire($answer['body'], $answer['status'] === 201);
+        return UpsertCustomerResult::fromWireCreated($answer['body'], $answer['status'] === 201);
     }
 
     /**

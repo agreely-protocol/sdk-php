@@ -12,14 +12,14 @@ namespace Agreely\Sdk\Types;
 final class ConsentDocumentDisclosure
 {
     public function __construct(
-        public readonly BilingualText $purpose,
-        public readonly BilingualText $means,
-        public readonly BilingualText $categories,
-        public readonly BilingualText $retention,
-        public readonly BilingualText $withdrawal,
-        public readonly BilingualText $recipients,
-        public readonly BilingualText $crossBorder,
-        public readonly BilingualText $rights,
+        public readonly LocalizedText $purpose,
+        public readonly LocalizedText $means,
+        public readonly LocalizedText $categories,
+        public readonly LocalizedText $retention,
+        public readonly LocalizedText $withdrawal,
+        public readonly LocalizedText $recipients,
+        public readonly LocalizedText $crossBorder,
+        public readonly LocalizedText $rights,
     ) {
     }
 
@@ -27,14 +27,14 @@ final class ConsentDocumentDisclosure
     public static function fromWire(array $wire): self
     {
         return new self(
-            BilingualText::fromWire($wire['purpose'] ?? null),
-            BilingualText::fromWire($wire['means'] ?? null),
-            BilingualText::fromWire($wire['categories'] ?? null),
-            BilingualText::fromWire($wire['retention'] ?? null),
-            BilingualText::fromWire($wire['withdrawal'] ?? null),
-            BilingualText::fromWire($wire['recipients'] ?? null),
-            BilingualText::fromWire($wire['crossBorder'] ?? null),
-            BilingualText::fromWire($wire['rights'] ?? null),
+            LocalizedText::fromWire($wire['purpose'] ?? null),
+            LocalizedText::fromWire($wire['means'] ?? null),
+            LocalizedText::fromWire($wire['categories'] ?? null),
+            LocalizedText::fromWire($wire['retention'] ?? null),
+            LocalizedText::fromWire($wire['withdrawal'] ?? null),
+            LocalizedText::fromWire($wire['recipients'] ?? null),
+            LocalizedText::fromWire($wire['crossBorder'] ?? null),
+            LocalizedText::fromWire($wire['rights'] ?? null),
         );
     }
 }

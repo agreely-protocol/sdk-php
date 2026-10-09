@@ -12,16 +12,16 @@ final class DeclaredFlag
 {
     public function __construct(
         public readonly bool $declared,
-        public readonly BilingualText $note,
+        public readonly LocalizedText $note,
     ) {
     }
 
     public static function fromWire(mixed $wire): self
     {
         if (!is_array($wire)) {
-            return new self(false, new BilingualText(null, null));
+            return new self(false, new LocalizedText(null, null));
         }
         /** @var array<string,mixed> $wire */
-        return new self(Wire::bool($wire['declared'] ?? false), BilingualText::fromWire($wire['note'] ?? null));
+        return new self(Wire::bool($wire['declared'] ?? false), LocalizedText::fromWire($wire['note'] ?? null));
     }
 }

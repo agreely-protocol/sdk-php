@@ -17,10 +17,10 @@ namespace Agreely\Sdk\Types;
  *
  * Null when no destroyed or anonymized declaration stands, and on a declaration made
  * before the field existed. After ERASED, customers()->upsert() refuses a value for
- * those four fields (409 identity_erased; a field may still be cleared); while a hold
- * keeps them it refuses any change (409 identity_held).
+ * those four fields (409 code identity_erased; a field may still be cleared); while a
+ * hold keeps them it refuses any change (409 code identity_held).
  */
-final class AgreelyIdentity
+final class AgreelyIdentityOutcome
 {
     public const ERASED        = 'erased';
     public const NONE_HELD     = 'none_held';
