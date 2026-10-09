@@ -46,7 +46,9 @@ defaults to Base mainnet (chainId 8453).
 There is no build step. Packagist reads a git tag.
 
 ```sh
-composer test          # unit suite must be green
+composer test                                  # unit suite must be green
+vendor/bin/phpstan analyse --memory-limit=1G   # level max, no errors
+vendor/bin/phpcs                               # PSR-12, no errors
 ```
 
 1. Push this repo to its public GitHub URL
@@ -55,10 +57,13 @@ composer test          # unit suite must be green
    https://packagist.org/packages/submit (one time), or rely on the GitHub
    webhook for later updates. The published Composer package name stays
    `agreely/sdk`; only the source repo moved.
-3. **Packagist reads a `v0.1.0` git tag** as the released version. The human
-   creates and pushes that tag at publish time.
+3. **Packagist reads the git tag** (`v0.5.0` for the current release) as the
+   released version. The human creates and pushes that tag at publish time, once the
+   matching CHANGELOG entry is on `main`.
 
 Notes:
-- `composer.json` name is `agreely/sdk`, license `MIT`.
-- Keep the version at `0.1.0` (via the `v0.1.0` tag). Do not create the tag
-  here; the human tags at publish time.
+- `composer.json` name is `agreely/sdk`, license `MIT`. It carries no version: the
+  tag is the version.
+- Release the same version as the TypeScript twin `@agreely/sdk`: both cover the same
+  /v1 surface under the same names.
+- Do not create the tag here; the human tags at publish time.

@@ -50,11 +50,37 @@ $d = $agreely->checkDetailed('cust_8812', 'Phone number', 'Billing');
 //                (null for "none"/"necessity" and for an acknowledged informed line)
 // $d->tier       "full" | "manual" | "verbal"  (present exactly when assurance is)
 // $d->basis      the declared non-consent basis  (ONLY on "necessity", else null)
+// $d->validUntil "2027-10-09T03:59:59Z"  the backing consent's end (null without a record)
+// $d->revokedAt  "2026-10-08T20:08:52Z"  when it was withdrawn (ONLY on "revoked", else null)
 // $d->checkedAt  "2026-…Z"
 ```
 
 A consent **deny is a normal 200** - `checkDetailed` returns it, it does not
 throw. Errors (auth, validation, rate-limit, outage) throw typed errors.
+
+`validUntil` is on every answer backed by a consent record (`revoked`, `expired` and
+`relationship_ended` included) and null when there is none (`none`, `necessity`, the
+named refusals). It is an **upper bound, never a cache lease**: a withdrawal ends the
+consent before that date and reaches only a host that checks again, and a renewal moves
+it. Read it on every check; never cache an allow until it.
+
+### Health, caching and failing closed
+
+- Call `identity()` (GET /v1/whoami) about **once a minute from a single scheduler** (a
+  cron, a leader), never per request or per worker: the 120 requests a minute are shared
+  by every key of the organisation.
+- On a **401** (`AgreelyAuthError`) or a **402** (`AgreelyBillingInactiveError`),
+  **purge anything you cached from Agreely and fail closed**.
+- **Never cache `check()`.** A withdrawal must deny on the very next call.
+- **Never decide consent from a cached catalog.** A catalog cell says what the
+  organisation declared, not what a person consented to.
+
+```php
+$who = $agreely->identity();
+$who->scopes;                    // the key's own scopes
+$who->company?->statute;         // "P-39.1" or "A-2.1": read it before switching on a legalBasis
+$who->company?->publicPolicyUrl; // the absolute url of the public privacy page, or null
+```
 
 ### The status vocabulary
 
@@ -161,11 +187,16 @@ $agreely->consentRequests()->create($input, ['idempotencyKey' => 'order-4471']);
 ### Idempotency
 
 The server honours `Idempotency-Key` on `consentRequests()->create`,
-`manualConsents()->record`, `verbalConsents()->record` and
-`verbalConsents()->confirmWithPaper`: a retry with the same key replays the original
-201 and records nothing new, so a dropped connection can never double-issue or
-double-attest. The SDK generates a key per call; pass your own only when you have a
-durable, operation-unique id.
+`manualConsents()->record`, `verbalConsents()->record`,
+`verbalConsents()->confirmWithPaper`, `withdrawals()->record`,
+`retention()->placeHold` and `retention()->releaseHold`: a retry with the same key
+replays the original answer and records nothing new, so a dropped connection can never
+double-issue or double-attest. The SDK generates a key per call; pass your own only
+when you have a durable, operation-unique id.
+
+`manualConsents()->createConsentSheet` is the exception: its key is a **latch**, not a
+replay. The same key and body mints nothing and answers 409 `already_minted`, because
+the printed reference and the claim token are never stored to be replayed.
 
 - On the **manual and verbal** endpoints the key is **bound to the endpoint and to the
   request body**: the same key with a different body is a new request, and a key
@@ -216,6 +247,11 @@ $page = $agreely->consentRequests()->list([
 
 $one     = $agreely->consentRequests()->get('0x…'); // the protocol requestId, NOT a uuid
 $catalog = $agreely->catalog()->list();             // discovery for issuance
+
+// One published document's active cells, its current version and the regime, for one intake screen:
+$form = $agreely->catalog()->forDocument('conditions-marketing');
+$form->documentVersionId;   // what the consent writes take
+$form->entries[0]->legalBasis;
 ```
 
 **`approved` means a consent was obtained.** It means the person confirmed and, when
@@ -245,6 +281,32 @@ endpoint, not a compliance decision: it reports whether a pending request exists
 it does not assert consent was given. A blank `customerId` throws
 `AgreelyConfigError` before any wire call.
 
+## Consent documents (scopes `check` or `issue`)
+
+Every consent write takes a `documentVersionId`; this is where it comes from. Pin a
+document by its stable `code` and resolve the current version through it: a version id
+goes stale at the next publication.
+
+```php
+$docs = $agreely->consentDocuments()->list();              // every published document
+$doc  = $agreely->consentDocuments()->get('conditions-marketing');
+$doc->documentVersionId;                                     // the version in force
+$doc->disclosure->withdrawal->text('fr');                    // the published text, verbatim, never translated for you
+
+// The information document of one version, as PDF bytes to print and hand to the person
+// ('attest' and 'attest_verbal' keys may fetch it too):
+$info = $agreely->consentDocuments()->getInformationPdf($doc->documentVersionId, ['locale' => 'fr']);
+file_put_contents('/tmp/' . ($info->filename ?? 'information.pdf'), $info->pdf);
+```
+
+`getInformationPdf` is by **version id**, never by code: the version a consent is
+recorded against is the one whose text the person must be given. A superseded version
+is served too (and says so); a draft never is. English is refused (422 code
+`english_text_missing`) when a section has no English text. The server renders the PDF,
+so the call's budget defaults to the client's `timeout` or 15 s, whichever is larger
+(`'timeout' => ms` overrides it). Fetching it records nothing: it is not evidence that
+anyone was informed.
+
 ## Paper consents (scope `attest`)
 
 Record a consent the person signed on paper. `items` names the consent **asks ticked
@@ -265,21 +327,77 @@ $paper->acknowledged;   // list<AcknowledgedLine>: the informed lines, never con
 $paper->asksDeclined;   // true when no ask was consented
 ```
 
+Two attestations, each sent only as JSON `true` (a non-boolean is refused before the
+call, `false` is the same as leaving it out):
+
+- `'versionAttested' => true` is **required** when the paper was signed before the
+  chosen version was published in Agreely: the organisation attests the signed document
+  asked consent for the same purposes, with the same information, as that version
+  (otherwise 422, reason `version_attestation_required`).
+- `'sensitiveExpressAttested' => true` is **required** when a ticked purpose is
+  sensitive and rests on the consent basis: the consent was express (otherwise 422,
+  reason `sensitive_express_required`).
+
 Refused with a 422: a document that asks no consent (a collection notice), an empty
 file or the SHA-256 of zero bytes, a file that is not a PDF, an escrowed PDF that does
-not hash to `pdfSha256`, and the `validUntil` rules above. Refused with a 409
-(`AgreelyConflictError`, code `conflict`): a purpose already held by an active
-passkey consent, and a paper for a customer and document while a **verbal consent
-awaits its paper** (send that paper with `verbalConsents()->confirmWithPaper()`).
+not hash to `pdfSha256`, an `effectiveDate` instant in the future by any amount
+(`effective_date_in_future`), and the `validUntil` rules above. Refused with a 409
+(`AgreelyConflictError`, code `conflict`; read `->reason`): a purpose already held by
+an active passkey consent (`stronger_consent_active`), a paper for a customer and
+document while a **verbal consent awaits its paper** (`verbal_awaits_paper`: send that
+paper with `verbalConsents()->confirmWithPaper()`), an ended relationship
+(`relationship_ended`), a paper signed before a withdrawal recorded for the same
+purpose (`predates_withdrawal`), and a new sheet over a consent still in force that
+would end before it (`renewal_ends_before_current`). A new sheet that ends no earlier
+is accepted and the gate moves to it; withdrawing either one later withdraws both.
 
-`createClaimLink()` answers `AgreelyNotFoundError` for a customer the company holds
-no record of, and `AgreelyConflictError` once the relationship has ended.
+`createClaimLink()` answers `AgreelyNotFoundError` (reason `unknown_customer`) for a
+customer the company holds no record of, and `AgreelyConflictError` (reason
+`relationship_ended`) once the relationship has ended.
 
 `revoke()` withdraws a manual **or verbal** cell and says what the gate does now in
 `->gate`: `denied` (this consent backed it), `superseded` (a later consent for the
 same purpose already backs the gate, which **still allows**), or `unchanged` (an
-idempotent repeat). Withdrawing the manual cell that confirmed a verbal one withdraws
-that verbal cell too.
+idempotent repeat). A withdrawal attaches to the **purpose**: withdrawing the manual
+cell that confirmed a verbal one withdraws that verbal cell too, and so is every other
+consent still running for it. `erase()` reports `->gate` the same way.
+
+When the person later signed the same purpose **online with her passkey**, that
+signed consent holds the gate and `revoke()` / `erase()` never end it: they answer 409,
+reason `citizen_consent_at_gate`, and write nothing. Record her withdrawal with
+[`withdrawals()->record()`](#withdrawals-scope-withdraw), which withdraws both at one
+instant (then erase, if that is what was asked).
+
+### The signature sheet, printed with its claim
+
+Print the sheet the person signs, for one customer, minted with the claim she may
+later redeem:
+
+```php
+$sheet = $agreely->manualConsents()->createConsentSheet('cust_8812', [
+    'documentVersionId' => $documentVersionId,   // a PUBLISHED version that asks consent
+    'locale'            => 'fr',                 // default "fr"
+]);
+$printer->print($sheet->signatureSheet->bytes()); // the BLANK sheet, with the reference printed on it
+$sheet->printedReference;                         // e.g. "ABCD-EFGH"
+$mailer->send($person, $sheet->claim->claimUrl);  // ANOTHER channel, never with the sheet
+```
+
+**Two rules the host must keep:**
+
+1. **Never send the claim link in the same envelope or message as the sheet.** The
+   printed reference is the second factor of the link; it only defends a link that
+   travels separately. Both together make it decorative.
+2. **Never send the blank sheet's hash as `evidence.pdfSha256`.** The evidence of the
+   consent is the **signed** sheet, hashed once it comes back and recorded with
+   `record()`. That is why the response carries no hash.
+
+The reference and the claim token are returned **once** and never kept in clear: no
+later call recovers them. A new sheet retires the claim of the previous one, so the
+reference printed on it stops working. Refusals: 404 `unknown_customer`, 422
+`invalid_document` (not a published version of yours) or code `no_consent_ask` (reason
+`notice_only`: the version asks nothing), 409 `relationship_ended`, 409
+`already_minted` (the Idempotency-Key latch).
 
 ## Telephone consents (scopes `attest_verbal` and `attest`)
 
@@ -320,10 +438,27 @@ $call->consentRefs;    // the "yes" purposes and the acknowledged lines
 - `sensitiveExpressAttested` must be `true` when a "yes" purpose is sensitive and
   rests on the consent basis. `isMinor`, `paperExpected` and
   `sensitiveExpressAttested` are sent only when `true`.
-- A purpose already held by an active paper or passkey consent, or a relationship
-  that has ended, is a 409 `AgreelyConflictError` (code `conflict`): do not retry.
+- `obtainedAt` may not be in the future by any amount (422, reason
+  `obtained_at_in_future`); `scriptVersion` is your own label for the script read.
+- A purpose already held by an active paper or passkey consent (reason
+  `stronger_consent_active`, or `all_covered` when every ask is held), a relationship
+  that has ended (`relationship_ended`), or a call dated before a withdrawal recorded
+  for the same purpose (`predates_withdrawal`) is a 409 `AgreelyConflictError` (code
+  `conflict`): do not retry.
 - The organisation's daily limit of verbal consents is a 429
   `AgreelyVerbalDailyCapError`, which the SDK never auto-retries.
+
+**Renewing a paper consent by telephone.** A signed paper consent whose end falls in
+its **last 30 calendar days** (an Agreely product rule, not a statutory period) can be
+renewed by phone with this same `record()` call. A "yes" for that purpose is a **new**
+consent, the paper is never rewritten, and `/v1/check` answers tier `verbal` with the
+new `validUntil` until the new signed paper comes back (`confirmWithPaper()`, which
+raises it to `manual` with that same `validUntil`). A host requiring `manual` therefore
+sees `verbal` between the call and the paper. The renewal may not end before the paper
+(409 `renewal_ends_before_current`: a shorter consent is a withdrawal, record one
+instead) nor be dated before its signature (409 `renewal_predates_current`). A "no" at
+renewal withdraws nothing. Withdrawing either consent later withdraws both. A passkey
+consent is never renewed by telephone.
 
 **The signed paper came back** (scope `attest`: a key holding only `attest_verbal`
 gets a 403, because the paper mints a company-attested consent):
@@ -353,7 +488,77 @@ $history->purposes[0]->confirmedBy;   // the manual cell to withdraw once the pa
 Withdraw a verbal cell with `manualConsents()->revoke()` (`attest` or
 `attest_verbal`; a verbal-only key reaches verbal refs only), erase it with
 `manualConsents()->erase()` (`attest` only). A verbal ref whose paper came back
-answers 409: act on the confirming manual ref instead.
+answers 409 (reason `superseded_by_paper`): act on the confirming manual ref instead.
+
+## Withdrawals (scope `withdraw`)
+
+Record, **on the person's behalf**, the withdrawal she asked you for, by any channel,
+of **any** consent ask you hold for her: a paper or telephone consent, and a consent she
+signed online with her passkey. `/v1/check` denies at once.
+
+```php
+$w = $agreely->withdrawals()->record('cust_8812', $consentRef, [
+    'channel'     => 'phone',                  // phone | email | mail | in_person | other
+    'operator'    => 'intervenant-0042',       // YOUR opaque staff id: never a name, never an email
+    'requestedAt' => '2026-10-08T09:15:00-04:00', // optional: when she asked, as declared
+    'reason'      => 'Ne souhaite plus recevoir l\'infolettre.', // optional, at most 1000 characters
+]);
+$w->gate;            // "denied" | "superseded" | "unchanged": what /v1/check does now
+$w->alsoWithdrawn;   // the other consents of the purpose withdrawn at the same instant
+$w->recordedOnBehalf; // always true; $w->assurance is always "company_attested"
+```
+
+- **Honest by construction.** The answer always says `recordedOnBehalf: true` and
+  `assurance: "company_attested"`: Agreely records that the organisation says it
+  received and actioned the request; it did not witness it, and it is never the
+  person's own signature. The answer is the same whatever the consent's tier.
+- **A withdrawal attaches to the purpose.** The other consents of the purpose still
+  running in its chain (a renewal and the paper it renewed, a telephone consent and its
+  paper, and a consent she signed online at or before `requestedAt`) are withdrawn at
+  the same instant and listed in `alsoWithdrawn`. Read `gate`, never `withdrawn` alone:
+  `superseded` means another consent still holds the gate.
+- **Its own scope**, never pre-ticked and never implied by `attest`, because it is the
+  only /v1 door to a consent the person signed. Ask for it explicitly.
+- **The one route a company behind on its payments keeps**: honouring a withdrawal is a
+  legal duty, not a paid service, so it never answers the 402.
+- Accepted after the relationship ended. Idempotent: a repeat answers
+  `alreadyWithdrawn: true`, `gate: "unchanged"`.
+- Refusals (read `->reason`): 404 `unknown_consent` (an unknown, malformed or foreign
+  reference, and another customer's consentRef, all answer the same), 409
+  `consent_lapsed` (it ended on its own date: re-read `/v1/check`), 422 `not_revocable`
+  (the cell was never a consent ask), `requested_at_in_future`,
+  `requested_at_before_grant`, and the 429 `AgreelyWithdrawalDailyCapError` (at most 50
+  per rolling 24 hours unless the operator set another value; no Retry-After; record
+  further withdrawals from the customer record in Agreely). The SDK refuses a channel
+  outside the list, an operator shaped like an email or a name, a `requestedAt` with no
+  offset and an over-long reason before the call.
+
+## Customer registry (scope `registry`)
+
+The identity Agreely holds for one of your customers, addressed by one `customerRef`
+you already hold. There is no list, by construction.
+
+```php
+$record = $agreely->customers()->upsert('cust_8812', [
+    'displayName'  => 'Marie Tremblay',
+    'email'        => null,               // null or "" CLEARS a field
+    'legalBasis'   => 'contract',         // a NON-consent ground of your act
+    'noticeLocale' => 'fr',
+]);
+$record->created;          // true when this call created the record (201)
+$record->hasDisplayName;   // metadata only: never the name, the email or the note
+
+$agreely->customers()->get('cust_8812');  // the same metadata, with the relationship's status
+```
+
+**`upsert` is a merge, never a replace:** a field you leave out is untouched, `null` or
+`""` clears it, a value writes it. So a sync that only knows addresses never wipes a
+name someone curated in Agreely. A read returns booleans for every personal field: a
+per-reference read that returned an address would be a bulk export with a loop around
+it. `legalBasis: "consent"` is refused (a client held on consent belongs to the consent
+flow). Once a declared destruction removed the identity, a value is a 409 code
+`identity_erased` (a clear still works); while a hold on all the information keeps it,
+any change is a 409 code `identity_held`.
 
 ## Host retention (scope `retention`)
 
@@ -493,6 +698,83 @@ $forRun->staleForMs;     // how old they were
 "Agreely is down", and treating them as one would hide a key or billing problem behind
 what looks like a skipped night.
 
+### The holds a purge must skip (scope `holds`)
+
+A retention hold keeps one customer's information despite the rules: a rights request
+the person made (P-39.1 s. 36 / A-2.1 s. 102.1), or another law. A purge job reads the
+holds in place **before** it purges anything. The feed carries **references and scope,
+never the reason**. `holds` is never granted by default: a purge job's key carries
+`retention` **and** `holds`.
+
+```php
+$sync = $agreely->retention()->syncHolds(['changedSince' => $storedCursor]); // null: a full snapshot
+foreach ($sync->holds as $hold) {
+    $heldSet->upsert($hold->id, $hold);       // at least once: upsert by id
+}
+// mode "snapshot" REPLACES your whole active set; "delta" lists what was placed or released since
+$store->put($sync->cursor);                   // the next sync's changedSince
+
+if ($hold->scope->covers($ruleKey, $cellKey)) { /* skip this record */ }
+```
+
+**Purge only after `syncHolds()` returns.** It reads every page (500 rows each) and
+collects them; any error (401, 403, 402, a 5xx, a timeout) **throws**, and a sync longer
+than `maxPages` (default 1000) throws rather than return a partial set. On any throw,
+purge nothing this run and store no cursor. `listHolds()` reads one page and
+`holdPages()` yields them one by one, for a job that streams.
+
+### One customer's retention (scope `registry`)
+
+```php
+$posture = $agreely->retention()->getCustomerRetention('cust_8812');
+$posture->clock->dueAt;     // the earliest horizon of a rule NO hold suspends, or null
+$posture->clock->reason;    // why null: no_declared_rule | relationship_active | hold_active
+$posture->clock->rules[0]->held;   // suspended by a hold: its date is arithmetic, not a date to act on
+$posture->disposition;      // the standing declaration, or null
+$posture->activeHolds();
+
+$hold = $agreely->retention()->placeHold('cust_8812', [
+    'ground'    => 'other_law',                      // or 'rights_request'
+    'provision' => 'Loi sur les impôts, art. 35',    // REQUIRED for other_law, refused otherwise
+    'scope'     => 'all',                            // or ['rules' => [...], 'cells' => [...]]
+    'reviewOn'  => '2027-10-09',                     // a reminder only: nothing ever releases a hold on it
+]);
+
+$released = $agreely->retention()->releaseHold('cust_8812', $hold->hold->id, [
+    'reason' => 'Recours épuisés.',                  // REQUIRED: lifting a hold is a motivated act
+]);
+$released->agreelyIdentity;   // "erased" when this release removed Agreely's copy of the identity
+
+$declared = $agreely->retention()->declareDisposition('cust_8812', [
+    'disposition' => 'destroyed',                    // destroyed | anonymized | legal_hold
+]);
+$declared->appended;                     // false: an identical standing declaration was replayed
+$declared->declaration->agreelyIdentity; // erased | none_held | retained_hold | retained
+$declared->warnings;                     // hold_active: recorded as received, never refused
+```
+
+- **The clock never invents a period.** With no declared rule, `dueAt` is null with
+  reason `no_declared_rule`, never a defaulted 12 or 24 months. The recipe ships beside
+  the answer so you recompute the date rather than trust it.
+- **A disposition is declared against an ended relationship only** (409 code
+  `relationship_active` otherwise): end it with `relationships()->end()`, or place a hold
+  to keep information while it runs. Append-only: a correction is a superseding
+  declaration. `legal_hold` requires a `reason` naming the law; `retentionUntil` applies
+  to it only.
+- 🔴 **Irreversible side effect.** An appended `destroyed` or `anonymized` declaration
+  removes the name, email, basis note and notice language Agreely holds for the
+  customer, unless an active hold on **all** the information keeps them; releasing that
+  last hold then removes them. `agreelyIdentity` says what happened. Existing backups
+  are not altered.
+- A host never links a rights request; the rights register places its own holds. At
+  most 50 active holds per customer (422 code `too_many_holds`) and 1000 placed through
+  /v1 per organisation per 24 hours (429 `AgreelyDailyCapError`, code
+  `hold_budget_exhausted`). Releasing a hold your system did not place counts against a
+  rolling 24-hour cap (code `hold_release_cap_reached`) and the workspace owner is
+  emailed; an already released hold is a 409 code `already_released`.
+- Everything here is **declared, never verified**: Agreely observes nothing in your
+  systems.
+
 ## Inventory (scope `inventory`)
 
 A host system declares the record sets it holds and the **names** of their fields,
@@ -525,10 +807,13 @@ call is withdrawn (it stays listed, marked withdrawn). Always build the whole li
 from one source of truth, and check `->withdrawn` on a run that meant to change
 nothing. An **empty** list is refused rather than read as "withdraw everything",
 because a serialisation bug must never retire a whole inventory in one call. Also
-refused client-side: more than 50 sets, a set with no fields or more than 60, an
+refused client-side: more than 200 sets, a set with no fields or more than 60, an
 id-shaped key, and any member outside `key` / `label` / `labelEn` / `fields` (so a
 `value` smuggled into a field object never leaves your process, and the refusal never
-echoes what was sent).
+echoes what was sent). Server-side, a set label holds 1 to 120 characters and a field
+label 1 to 200, and an organisation introduces at most **1000 new set keys** in any
+rolling 30 days (422 code `new_set_limit`): a key declared before is always accepted,
+so re-declaring the same list always passes; renaming keys on every call does not.
 
 ```php
 $sets = $agreely->inventory()->listCategories(['hostSystem' => 'crm']); // withdrawn ones included
@@ -562,8 +847,10 @@ an error**.
 | `AgreelyBillingInactiveError` | 402 - the company's Agreely subscription lapsed |
 | `AgreelyRateLimitError`     | 429 (`->retryAfter` seconds)          |
 | `AgreelySweepTooFrequentError` | 429 `sweep_too_frequent` - the per-(rule, hostSystem) 15-minute floor, a subclass of the above. NEVER auto-retried |
-| `AgreelyVerbalDailyCapError` | 429 `verbal_daily_cap` - the organisation's daily limit of verbal consents, a subclass of the rate-limit error. NEVER auto-retried |
-| `AgreelyConflictError`      | 409. Code `retry` (`->isRetryable()`): a declaration lost a race, retry with the **same** Idempotency-Key. Code `conflict` (`->isStateConflict()`): the request contradicts the record's state (a covered purpose, an ended relationship, a paper already recorded); retrying changes nothing |
+| `AgreelyDailyCapError`      | 429 on a rolling 24-hour cap: `hold_budget_exhausted`, `hold_release_cap_reached`, and the two subclasses below. A subclass of the rate-limit error. NEVER auto-retried |
+| `AgreelyVerbalDailyCapError` | 429 `verbal_daily_cap` - the organisation's daily limit of verbal consents |
+| `AgreelyWithdrawalDailyCapError` | 429 `withdrawal_daily_cap` (reason `daily_cap`) - withdrawals recorded over /v1 in 24 hours. No Retry-After |
+| `AgreelyConflictError`      | 409. Code `retry` (`->isRetryable()`): a declaration lost a race, retry with the **same** Idempotency-Key. Code `conflict` (`->isStateConflict()`): the request contradicts the record's state, `->reason` says which; retrying changes nothing. Other codes name their state: `identity_held`, `identity_erased`, `already_released`, `already_minted`, `relationship_active` |
 | `AgreelyUnavailableError`   | 503 / network / timeout               |
 | `AgreelyConfigError`        | bad client config, or input refused before the wire call |
 
@@ -577,8 +864,28 @@ try {
 }
 ```
 
-Each error exposes `->code` (the wire code string), `->status` (HTTP status), and
-`->field` (validation only).
+Each error exposes `->code` (the wire code string), `->status` (HTTP status),
+`->field` (the input the refusal is about, when the server named one) and `->reason`.
+
+**Branch on `->reason`, never on the message.** Every refusal of the manual, verbal,
+claim-link, consent-sheet and withdrawal routes carries a stable `reason` beside a
+generic `code`; the registry, holds, dispositions and inventory carry their stable
+string in `code` instead. `Agreely\Sdk\Errors\ErrorReason` and `ErrorCode` name the
+known values. A reason the server adds later is readable as a plain string: it never
+throws and never maps to another value, so fall back on `->code` for it.
+
+```php
+use Agreely\Sdk\Errors\AgreelyConflictError;
+use Agreely\Sdk\Errors\ErrorReason;
+
+try {
+    $agreely->manualConsents()->revoke($consentRef);
+} catch (AgreelyConflictError $e) {
+    if ($e->hasReason(ErrorReason::CITIZEN_CONSENT_AT_GATE)) {
+        $agreely->withdrawals()->record($customerRef, $consentRef, ['channel' => 'phone', 'operator' => 'agent-12']);
+    }
+}
+```
 
 A `402` `AgreelyBillingInactiveError` means the **company's** Agreely subscription
 lapsed (trial ended unpaid, `past_due`, or canceled) - not an outage. `check()`
@@ -600,7 +907,13 @@ try {
 
 Low default timeout (**800ms** total budget). Only idempotent reads and the check
 are retried on a transient outage (network / 503): up to 2 attempts, jittered,
-inside the budget. `consentRequests()->create` is **never** retried.
+inside the budget. No write is ever auto-retried. With `maxRetries`, a read is
+retried on a 429 only for the per-minute window (`rate_limited`), never on a cap.
+
+The two calls the server answers by rendering a PDF
+(`consentDocuments()->getInformationPdf()` and `manualConsents()->createConsentSheet()`)
+take the client's `timeout` or **15 s**, whichever is larger, and accept their own
+`'timeout' => ms` option.
 
 ```php
 new Agreely(['apiKey' => $key, 'timeout' => 1200]); // ms, including retries
@@ -738,14 +1051,16 @@ new Agreely(['apiKey' => $key, 'httpClient' => $myClient]);
   `attest_verbal` (never granted by default) authorizes recording a telephone consent,
   reading its history, and revoking verbal cells only;
   `relationship` authorizes the relationship end/revert; either `check` or `issue`
-  reads `GET /v1/catalog`; `retention` authorizes the retention rules, the catalogue
-  cells and the purge and pass declarations; `inventory` authorizes the inventory
-  declaration and its reads. `registry` is in the vocabulary because a key can carry
-  it and `identity()` will report it, but **no resource here wraps it**: it reads and
-  writes a named customer's identity record, it is addressed only by a
-  `customer_ref` you already hold, and it has no list endpoint by construction.
-  `identity()` returns whatever the server sends, so a scope added later can reach
-  you at runtime.
+  reads `GET /v1/catalog` and the consent documents (the information PDF also
+  accepts `attest` and `attest_verbal`); `attest` also prints consent sheets;
+  `retention` authorizes the retention rules, the catalogue cells and the purge and
+  pass declarations; `inventory` authorizes the inventory declaration and its reads;
+  `registry` authorizes one customer's identity, retention posture, dispositions and
+  holds, addressed only by a `customerRef` you already hold (no list endpoint, by
+  construction); `withdraw` (never granted by default) records a person's withdrawal
+  on her behalf; `holds` (never granted by default) reads the feed of the holds in
+  place. `identity()` returns whatever the server sends, so a scope added later can
+  reach you at runtime.
 
 ## Open and auditable
 

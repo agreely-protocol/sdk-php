@@ -4,6 +4,88 @@ All notable changes to `agreely/sdk` (PHP) are documented here. This project
 adheres to [Semantic Versioning](https://semver.org/). Packagist reads the git
 tag as the released version.
 
+## 0.5.0 - 2026-10-09
+
+Covers the whole production /v1 API as deployed on 2026-10-09. Every route the API
+tier serves now has a method, and the TypeScript twin `@agreely/sdk` 0.5.0 exposes the
+same surface under the same names.
+
+### Breaking
+
+- **`manualConsents()->record()` takes a CLOSED input.** A member outside `customerId`,
+  `documentVersionId`, `effectiveDate`, `validUntil`, `items`, `evidence`,
+  `versionAttested` and `sensitiveExpressAttested` is refused before the call
+  (`AgreelyConfigError`) instead of being dropped. A misspelt statutory attestation
+  must fail loudly, not reach the server as "not attested".
+- **A 429 keeps the code it was sent with, and only `rate_limited` is ever
+  auto-retried.** Before, any 429 this client did not know read `rate_limited` and could
+  be retried on a read with `maxRetries` set. Every other 429 is a cap that waiting
+  seconds does not lift.
+
+### Added
+
+- **`reason` and `field` on every API error.** `$e->reason` is the stable machine reason
+  the server sends beside `code` on the manual, verbal, claim-link, consent-sheet and
+  withdrawal routes; compare it, never the message. `ErrorReason` names the known
+  values, `ErrorCode` the known codes (the registry, holds, dispositions and inventory
+  carry their stable string in `code`), and `$e->hasReason()` compares one. An unknown
+  future reason is readable as a plain string and never throws.
+- **`AgreelyDailyCapError`**, the rolling 24-hour caps, never auto-retried:
+  `AgreelyWithdrawalDailyCapError` (`withdrawal_daily_cap`, new),
+  `AgreelyVerbalDailyCapError` (now a subclass of it), and the hold caps
+  `hold_budget_exhausted` and `hold_release_cap_reached`.
+- **`validUntil` and `revokedAt` on `CheckResult` and `BatchDecision`**: the end of the
+  consent backing the answer and, on `revoked`, the withdrawal instant. Null when there
+  is no consent record (the keys are absent from the wire). `validUntil` is an upper
+  bound, never a cache lease.
+- **`$agreely->consentDocuments()`**: `list()`, `get($code)` with the full published
+  information, and `getInformationPdf($documentVersionId, ['locale' => ..., 'timeout' => ...])`,
+  the information document as PDF bytes (`InformationDocument`).
+- **`$agreely->catalog()->forDocument($documentCode)`**: the active cells of one published
+  document with its current `documentVersionId` and the regime. `CatalogEntry` gains
+  `legalBasis` and `sensitive`, which the wire always carried.
+- **`manualConsents()->createConsentSheet($customerRef, ...)`**: the signature sheet of a
+  published version for one customer, minted with its claim and returned once
+  (`ConsentSheet`). Its Idempotency-Key is a latch: a retry answers 409 `already_minted`.
+- **`manualConsents()->record()` sends `versionAttested` and `sensitiveExpressAttested`**,
+  each as JSON `true` only, and refuses a non-boolean.
+- **`ManualConsentErasure::$gate`**: what /v1/check does after an erasure.
+- **`$agreely->withdrawals()->record($customerRef, $consentRef, ...)`** (scope
+  `withdraw`): a person's withdrawal of any consent ask, recorded on her behalf
+  (`ConsentWithdrawal`, with `gate` and `alsoWithdrawn`). The one route that never
+  answers the billing 402.
+- **`$agreely->customers()`** (scope `registry`): `get()` and `upsert()`, the registry
+  identity as metadata. `upsert()` is a merge (absent untouched, null clears) and says
+  whether it `created` the record.
+- **Per-customer retention on `$agreely->retention()`** (scope `registry`):
+  `getCustomerRetention()` (the derived clock, the standing disposition and the holds),
+  `declareDisposition()`, `placeHold()` and `releaseHold()`, with `agreelyIdentity` on
+  what a declaration or a release did to Agreely's own copy of the identity.
+- **The holds feed on `$agreely->retention()`** (scope `holds`): `listHolds()` (one
+  page), `holdPages()` (a Generator of pages) and `syncHolds()`, one complete sync with
+  the cursor to persist, which throws rather than return a partial feed.
+- **`Identity::$company`** (name, sector, statute, public policy url) and
+  `Identity::hasScope()`. `Scope` adds `WITHDRAW` and `HOLDS`.
+- `RequestSpec::$timeoutMs`, a per-call budget. The two calls the server answers by
+  rendering a PDF default to the client's `timeout` or 15 s, whichever is larger.
+
+### Changed
+
+- **`Inventory::MAX_SETS` is 200** (was 50), as the server now accepts. A company may
+  introduce at most 1000 new set keys in any rolling 30 days (422 `new_set_limit`).
+
+### Documented
+
+- The health probe: call `identity()` about once a minute from a single scheduler; on a
+  401 or a 402, purge anything cached from Agreely and fail closed. Never cache
+  `check()`, and never decide consent from a cached catalog.
+- Telephone renewal of a paper consent in its last 30 days, with
+  `renewal_ends_before_current`, `renewal_predates_current` and `predates_withdrawal`.
+- A withdrawal attaches to the purpose; `citizen_consent_at_gate` on revoke and erase,
+  and the withdrawal route as the way to end a consent the person signed online.
+- The two consent-sheet rules: never send the claim link in the same envelope as the
+  sheet, and never send the blank sheet's hash as `evidence.pdfSha256`.
+
 ## 0.4.0 - 2026-09-29
 
 Aligns the client with the production /v1 API as deployed on 2026-09-29 (the verbal
