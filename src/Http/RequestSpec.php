@@ -16,6 +16,9 @@ final class RequestSpec
      *   outage (network / 503). TRUE only for idempotent reads and the check (a
      *   pure read). NEVER for consentRequests.create — it emails; a retry there
      *   must replay via the Idempotency-Key, not re-issue.
+     * @param int|null $timeoutMs This call's TOTAL time budget, replacing the client's
+     *   `timeout` for this call only. Null keeps the client's. Used where the server
+     *   renders a PDF, which a budget sized for the consent check would cut off.
      */
     public function __construct(
         public readonly string $method,
@@ -24,6 +27,7 @@ final class RequestSpec
         public readonly ?array $body = null,
         public readonly array $headers = [],
         public readonly bool $idempotentRetry = false,
+        public readonly ?int $timeoutMs = null,
     ) {
     }
 }

@@ -26,7 +26,8 @@ class AgreelySweepTooFrequentError extends AgreelyRateLimitError
         ?int $status = 429,
         ?int $retryAfter = null,
         ?\Throwable $previous = null,
+        ?string $reason = null,
     ) {
-        parent::__construct($message, $code, $status, $retryAfter, $previous);
+        parent::__construct($message, $code, $status, $retryAfter, $previous, $reason);
     }
 }

@@ -9,11 +9,12 @@ namespace Agreely\Sdk\Errors;
  * (telephone) consents.
  *
  * It is a per-company DAILY cap, not the per-minute rate window, so waiting a few
- * seconds does not lift it. A subclass of AgreelyRateLimitError, so a generic
- * rate-limit catch still catches it. The SDK NEVER auto-retries it, even when
- * maxRetries is set: record the consent tomorrow, or on paper.
+ * seconds does not lift it. A subclass of AgreelyDailyCapError (and so of
+ * AgreelyRateLimitError), so a generic rate-limit catch still catches it. The SDK
+ * NEVER auto-retries it, even when maxRetries is set: record the consent tomorrow,
+ * or on paper.
  */
-class AgreelyVerbalDailyCapError extends AgreelyRateLimitError
+class AgreelyVerbalDailyCapError extends AgreelyDailyCapError
 {
     public function __construct(
         string $message,
@@ -21,7 +22,8 @@ class AgreelyVerbalDailyCapError extends AgreelyRateLimitError
         ?int $status = 429,
         ?int $retryAfter = null,
         ?\Throwable $previous = null,
+        ?string $reason = null,
     ) {
-        parent::__construct($message, $code, $status, $retryAfter, $previous);
+        parent::__construct($message, $code, $status, $retryAfter, $previous, $reason);
     }
 }
