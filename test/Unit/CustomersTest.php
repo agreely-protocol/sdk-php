@@ -397,4 +397,10 @@ final class CustomersTest extends TestCase
         }
         $this->assertFalse(RetentionHold::fromWire(self::apiHold('released'))->isActive());
     }
+
+    public function testTheNewVocabulariesListTheirValues(): void
+    {
+        $this->assertSame(['active', 'ending', 'ended'], \Agreely\Sdk\Types\RelationshipLifecycle::ALL);
+        $this->assertSame(['erased', 'none_held', 'retained_hold', 'retained'], AgreelyIdentityOutcome::ALL);
+    }
 }

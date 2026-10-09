@@ -14,6 +14,9 @@ final class RelationshipLifecycle
     public const ENDING = 'ending';
     public const ENDED  = 'ended';
 
+    /** The closed vocabulary. */
+    public const ALL = [self::ACTIVE, self::ENDING, self::ENDED];
+
     private function __construct()
     {
     }

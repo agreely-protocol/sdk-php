@@ -27,6 +27,9 @@ final class AgreelyIdentityOutcome
     public const RETAINED_HOLD = 'retained_hold';
     public const RETAINED      = 'retained';
 
+    /** The closed vocabulary. */
+    public const ALL = [self::ERASED, self::NONE_HELD, self::RETAINED_HOLD, self::RETAINED];
+
     private function __construct()
     {
     }

@@ -19,6 +19,7 @@ namespace Agreely\Sdk\Types;
  *
  * Not final: {@see PlacedHold} and {@see ReleasedHold} extend it with the answer's own
  * fields, as the TypeScript twin's interfaces do.
+ * It is extended by the SDK's own results, not an extension point: do not subclass it.
  */
 class RetentionHold
 {

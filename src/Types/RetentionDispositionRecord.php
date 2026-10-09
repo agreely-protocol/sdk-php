@@ -20,6 +20,7 @@ namespace Agreely\Sdk\Types;
  * systems, and it records who declared what and when.
  *
  * Not final: {@see DeclaredDisposition} extends it, as the TypeScript twin's interface does.
+ * It is extended by the SDK's own results, not an extension point: do not subclass it.
  */
 class RetentionDispositionRecord
 {

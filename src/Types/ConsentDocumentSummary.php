@@ -16,6 +16,7 @@ namespace Agreely\Sdk\Types;
  *   effectiveDate      a calendar DATE; `publishedAt` an RFC 3339 UTC instant or null
  *
  * Not final: {@see ConsentDocumentDetail} extends it, as the TypeScript twin's interface does.
+ * It is extended by the SDK's own results, not an extension point: do not subclass it.
  */
 class ConsentDocumentSummary
 {

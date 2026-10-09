@@ -21,6 +21,7 @@ namespace Agreely\Sdk\Types;
  *
  * Not final: {@see UpsertCustomerResult} extends it with `created`, as the TypeScript
  * twin's interface does.
+ * It is extended by the SDK's own results, not an extension point: do not subclass it.
  */
 class CustomerRecord
 {
