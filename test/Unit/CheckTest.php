@@ -72,7 +72,7 @@ final class CheckTest extends TestCase
         $http = new MockHttpClient([
             MockHttpClient::json(200, ['decision' => 'allow', 'status' => 'active', 'consentRef' => '0x1', 'checkedAt' => 'now']),
         ]);
-        // Mixed casing + whitespace MUST go raw — the SDK never normalizes.
+        // Mixed casing + whitespace MUST go raw, the SDK never normalizes.
         $this->client($http)->check('cust_8812', '  Email   ADDRESS ', "Marketing\tOutreach");
         $call = $http->calls[0];
         $this->assertSame('POST', $call->method);

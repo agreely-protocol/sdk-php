@@ -14,7 +14,7 @@ use PHPUnit\Framework\TestCase;
 
 /**
  * The offline receipt-verifier golden-vector parity gate. Loads the SHARED
- * vectors (../../vectors/vectors.json — the very file the TS suite asserts) and
+ * vectors (../../vectors/vectors.json, the very file the TS suite asserts) and
  * checks that Agreely::verifyReceipt canonicalizes (JCS) BYTE-IDENTICALLY to the
  * expected ReceiptVerification. If TS and PHP crypto/verification ever drift,
  * this file fails.
@@ -491,7 +491,7 @@ final class ReceiptVerificationTest extends TestCase
             'verifyDisclosure' => false,
         ]);
         // Offline the citizen label cannot be cryptographically FAILED (by design), but it is
-        // never 'pass', and the result is at most 'partial' — a relying party is not misled.
+        // never 'pass', and the result is at most 'partial', a relying party is not misled.
         $this->assertSame('unsupported', $result->cellLabelBinding);
         $this->assertNotSame('pass', $result->cellLabelBinding);
         $this->assertNotSame('verified', $result->overall);

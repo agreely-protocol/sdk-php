@@ -7,7 +7,7 @@ namespace Agreely\Sdk\Crypto;
 use RuntimeException;
 
 /**
- * A minimal CBOR reader — just enough to parse a WebAuthn COSE_Key map: unsigned
+ * A minimal CBOR reader, just enough to parse a WebAuthn COSE_Key map: unsigned
  * ints (major 0), negative ints (major 1), byte strings (major 2) and the map
  * header (major 5). Mirrors the TS SDK's parseCoseKey. Returns the fields the
  * verifier needs; unsupported algorithms resolve to alg 'unsupported'.

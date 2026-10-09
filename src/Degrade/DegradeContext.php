@@ -8,7 +8,7 @@ namespace Agreely\Sdk\Degrade;
  * The evidence record emitted for every degraded ALLOW (passed to onDegrade).
  *
  * NOTE: break-glass (gate 3 in the TS SDK) is intentionally OMITTED from the PHP
- * v1 — PHP requests are request-scoped with no long-lived in-process "engaged"
+ * v1, PHP requests are request-scoped with no long-lived in-process "engaged"
  * state, so break-glass would need a shared store (PSR-16 / a callable) to be
  * meaningful. `breakGlass` is therefore always false here and `reason` is always
  * null; the field is retained for shape parity with the TS DegradeContext.

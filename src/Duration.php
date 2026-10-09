@@ -64,7 +64,7 @@ final class Duration
      * A LOCAL policy key for degrade allow-list matching ONLY.
      *
      * IMPORTANT: this is NOT the server's normalizeKey and is NEVER applied to the
-     * category/purpose SENT to the server (those go raw — the hard rule). It only
+     * category/purpose SENT to the server (those go raw, the hard rule). It only
      * decides whether a category the integrator pre-declared in config matches the
      * category at a call site, so "Browsing/usage" and " browsing/usage " gate the
      * same way. A purely local, transparent comparison.

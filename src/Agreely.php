@@ -33,13 +33,13 @@ use Agreely\Sdk\Verify\ReceiptVerifier;
 
 /**
  * The Agreely client: a thin, near-stateless gate over the /v1 API. It holds an
- * api key, a base URL, an HTTP client, a timeout, and the degrade policy — NO
+ * api key, a base URL, an HTTP client, a timeout, and the degrade policy, NO
  * database, NO ref tables, and NO allow-cache (caching an allow while a revoke
  * lands mid-window is a stale-allow correctness failure, spec §16). Every check()
  * is a fresh authoritative call.
  *
  * Ported 1:1 from the @agreely/sdk TypeScript reference. Break-glass (TS gate 3)
- * is intentionally omitted in PHP v1 — it needs a shared store in PHP's
+ * is intentionally omitted in PHP v1, it needs a shared store in PHP's
  * request-scoped model (see README + DegradeContext).
  */
 final class Agreely
@@ -289,10 +289,10 @@ final class Agreely
      * signature/assertion checks need the signing key from the DID document (one HTTPS
      * resolution by default, or supply a local `resolver` for an air-gapped verify);
      * IPFS/anchor are the opt-in extra calls. When a DID cannot be resolved the check
-     * is "unavailable" (inconclusive), never "fail" (a tamper). Static — no API key.
+     * is "unavailable" (inconclusive), never "fail" (a tamper). Static, no API key.
      *
      * SECURITY: when verifying UNTRUSTED receipts, inject your own `resolver` (or
-     * supply DID documents locally) — the default did:web resolver fetches a host
+     * supply DID documents locally), the default did:web resolver fetches a host
      * taken from the receipt (HTTPS-only; it can never yield a false "verified").
      *
      * @param mixed $receipt a parsed receipt VC (assoc array)
@@ -312,7 +312,7 @@ final class Agreely
         return '0x' . hash('sha256', $bytes);
     }
 
-    /** Read a PDF from disk and hash it — see {@see Agreely::hashPdf}. */
+    /** Read a PDF from disk and hash it, see {@see Agreely::hashPdf}. */
     public static function hashPdfFile(string $path): string
     {
         $bytes = @file_get_contents($path);
@@ -326,9 +326,9 @@ final class Agreely
      * The boolean-ergonomic consent gate. ALLOW is the only true. A 200 deny ->
      * false. On an outage, the fail-closed default returns false; the explicit,
      * scoped, audited exception (config + per-call opt) may return true. NEVER
-     * throws on an outage — it resolves to a boolean.
+     * throws on an outage, it resolves to a boolean.
      *
-     * Send RAW category/purpose — the server normalizes; the SDK never does.
+     * Send RAW category/purpose, the server normalizes; the SDK never does.
      * Labels may be French OR English, with or without accents (case- and
      * whitespace-insensitive); English resolves only when the company disclosed an
      * English label for that cell, and an ambiguous/undeclared label fails closed.

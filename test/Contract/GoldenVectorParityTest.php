@@ -11,7 +11,7 @@ use PHPUnit\Framework\TestCase;
 
 /**
  * THE cross-SDK anti-drift gate. Loads the SHARED golden vectors
- * (../../vectors/vectors.json — the very file the TS SDK asserts) and drives
+ * (../../vectors/vectors.json, the very file the TS SDK asserts) and drives
  * the PHP SDK against the LIVE /v1 API, asserting the SAME decision / status /
  * consentRef-presence and the SAME typed error per vector that the TS SDK does.
  * If the contract drifts, BOTH SDKs fail on this file.

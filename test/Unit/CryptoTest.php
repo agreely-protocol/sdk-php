@@ -11,7 +11,7 @@ use Agreely\Sdk\Crypto\Keccak;
 use Agreely\Sdk\Crypto\Multibase;
 use PHPUnit\Framework\TestCase;
 
-/** The shared crypto primitives — the same values the TS crypto suite asserts. */
+/** The shared crypto primitives, the same values the TS crypto suite asserts. */
 final class CryptoTest extends TestCase
 {
     public function testKeccakEmptyVector(): void

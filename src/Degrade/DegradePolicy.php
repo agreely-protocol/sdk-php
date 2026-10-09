@@ -9,14 +9,14 @@ use Agreely\Sdk\Errors\AgreelyConfigError;
 
 /**
  * The fail-closed default + the two-gate fail-open exception, ported from the TS
- * degrade.ts. (Gate 3, break-glass, is OMITTED in PHP v1 — see DegradeContext.)
+ * degrade.ts. (Gate 3, break-glass, is OMITTED in PHP v1, see DegradeContext.)
  *
  * Default: on a 503 / timeout / network error, DENY. The exception is explicit,
- * scoped, and audited — never a silent global allow:
+ * scoped, and audited, never a silent global allow:
  *
  *   Gates 1+2 (config + per-call): a category fails open ONLY when it is in the
  *     config allow-list (gate 1) AND the call passes opts['onOutage'] === 'allow'
- *     (gate 2) — two independent gates — and the outage is still within
+ *     (gate 2), two independent gates, and the outage is still within
  *     maxOutageWindow.
  *
  * A 200 deny never reaches here (it is not an outage). Every degraded ALLOW emits
@@ -125,7 +125,7 @@ final class DegradePolicy
 
         // A per-call opt-in that reached here had NO effect (the category is not in
         // the config allow-list, or no degradeOnOutage config exists). It STILL
-        // denies (safety unchanged), but the silent no-op is a footgun — warn once.
+        // denies (safety unchanged), but the silent no-op is a footgun, warn once.
         if ($optedIn) {
             $this->warnIneffectiveOptIn($category);
         }
@@ -149,7 +149,7 @@ final class DegradePolicy
         }
         $this->warnedIneffectiveOptIn = true;
         error_log(
-            "[agreely] onOutage:\"allow\" had no effect for category \"{$category}\" — the check was DENIED. "
+            "[agreely] onOutage:\"allow\" had no effect for category \"{$category}\": the check was DENIED. "
             . 'A per-call fail-open is effective ONLY when the category is also listed in '
             . 'degradeOnOutage.categories (and degradeOnOutage is configured). Add the category to '
             . 'the allow-list. (Warns once per client; set AGREELY_SILENCE_WARNINGS to silence.)',

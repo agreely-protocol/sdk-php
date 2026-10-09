@@ -7,7 +7,7 @@ namespace Agreely\Sdk\Crypto;
 use RuntimeException;
 
 /**
- * Multibase / multicodec decode helpers — a byte-for-byte port of the app's
+ * Multibase / multicodec decode helpers, a byte-for-byte port of the app's
  * App\Models\Crypto\Multibase (and the TS SDK's crypto/encoding.ts). A verifier
  * resolves the company key from the DID document's `publicKeyMultibase` and the
  * detached signature from the proof's multibase `proofValue`, so the base58btc

@@ -7,7 +7,7 @@ namespace Agreely\Sdk\Http;
 /**
  * The pluggable, pure-HTTP transport contract. Implementations do ONE thing: send
  * one request and return the raw response (or throw TransportException on a
- * network failure / timeout). NO retries, NO error mapping, NO state — those live
+ * network failure / timeout). NO retries, NO error mapping, NO state, those live
  * in the Transport. Integrators can bring their own (Guzzle/PSR-18 adapter); the
  * default is a minimal curl client.
  */

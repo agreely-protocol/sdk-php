@@ -8,7 +8,7 @@ namespace Agreely\Sdk\Types;
  * The 200 body from POST /v1/customers/{customerRef}/relationship/end. Company-
  * side facts only: the customer's own ref, the terminal lifecycle, when it ended
  * and the recorded ORIGIN of the wind-down ('company', or 'citizen_request' when
- * a citizen close-account request had already begun the ending — the origin is
+ * a citizen close-account request had already begun the ending, the origin is
  * never overwritten). NEVER a DID or a consent_ref.
  */
 final class RelationshipEnded

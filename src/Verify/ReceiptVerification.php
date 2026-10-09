@@ -5,13 +5,13 @@ declare(strict_types=1);
 namespace Agreely\Sdk\Verify;
 
 /**
- * The full, honest result of an offline receipt verification — the PHP twin of
+ * The full, honest result of an offline receipt verification, the PHP twin of
  * the TS SDK's ReceiptVerification. HONESTY IS THE POINT: each field reports what
  * was PROVED vs merely trusted, and `overall` never overstates it (a citizen
  * receipt is at most "partial" offline).
  *
  * Statuses are strings: 'pass' | 'fail' | 'unavailable' | 'skipped' | 'unsupported'
- * ('unavailable' = the DID could not be resolved, so the check could not complete —
+ * ('unavailable' = the DID could not be resolved, so the check could not complete,
  * distinct from 'fail', a real signature mismatch). overall: 'verified' | 'partial'
  * | 'failed' | 'unavailable'. receiptType: 'company_attested' | 'company_documented'
  * (a verbal, telephone receipt: at most 'partial') | 'citizen'.

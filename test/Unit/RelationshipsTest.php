@@ -15,7 +15,7 @@ use Agreely\Sdk\Types\RelationshipReverted;
 use PHPUnit\Framework\TestCase;
 
 /**
- * relationships()->end (scope: 'relationship') — behaviour parity with the TS
+ * relationships()->end (scope: 'relationship'), behaviour parity with the TS
  * relationships.end: the customer-scoped POST, the terminal ended body, the
  * REQUIRED-reason fail-closed guard, and the 403 / 422 / 404 surfacing.
  */

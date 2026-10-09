@@ -165,11 +165,11 @@ final class ConsentRequests
     }
 
     /**
-     * Cancel a still-PENDING request by its protocol requestId (0x + 64hex) — the
+     * Cancel a still-PENDING request by its protocol requestId (0x + 64hex), the
      * company-side "revoke before action" path. The request flips to the terminal
      * revoked_before_action status so its deep link no longer leads to an approval.
      *
-     * IDEMPOTENT server-side: an already-terminal request is NOT an error — it
+     * IDEMPOTENT server-side: an already-terminal request is NOT an error, it
      * returns cancelled=false with its current status. Only a pending->cancelled
      * transition returns cancelled=true. An unknown/foreign id throws
      * AgreelyNotFoundError (404). Never auto-retried (it mutates).

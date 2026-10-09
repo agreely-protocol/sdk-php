@@ -7,7 +7,7 @@ namespace Agreely\Sdk\Crypto;
 use stdClass;
 
 /**
- * A strict, NUMBER-FREE JCS (RFC 8785) canonicalizer — a byte-for-byte port of
+ * A strict, NUMBER-FREE JCS (RFC 8785) canonicalizer, a byte-for-byte port of
  * the Agreely app's App\Models\Crypto\Canonicalizer and of the TS SDK's
  * crypto/jcs.ts. The output is the deterministic UTF-8 byte string a verifier
  * re-canonicalizes and hashes, so it MUST match across PHP, TS and the server:

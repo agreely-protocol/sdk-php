@@ -7,7 +7,7 @@ namespace Agreely\Sdk\Test\Contract;
 /**
  * The live-fixture accessor for the contract suite. The fixture is produced by
  * `scripts/sdk-contract-seed.php` (run in the api container) and written to
- * test/Contract/fixture.json — the SAME seed + the SAME golden vectors the TS SDK
+ * test/Contract/fixture.json, the SAME seed + the SAME golden vectors the TS SDK
  * uses, which is what makes this the cross-SDK anti-drift gate.
  */
 final class Fixture

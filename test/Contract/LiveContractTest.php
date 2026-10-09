@@ -95,7 +95,7 @@ final class LiveContractTest extends TestCase
         );
         $this->assertSame(0, $code, 'revoke subcommand failed: ' . implode("\n", $out));
 
-        // The very next check denies — no chain wait, no allow-cache (spec §17.9 / §16).
+        // The very next check denies, no chain wait, no allow-cache (spec §17.9 / §16).
         $after = $agreely->checkDetailed($this->fixture->subject(), $r['category'], $r['purpose']);
         $this->assertSame('deny', $after->decision);
         $this->assertSame('revoked', $after->status);

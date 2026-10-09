@@ -12,7 +12,7 @@ use Agreely\Sdk\Crypto\Signature;
 use Throwable;
 
 /**
- * The offline-first, honest consent-receipt verifier — a byte-for-byte behavioural
+ * The offline-first, honest consent-receipt verifier, a byte-for-byte behavioural
  * port of the TS SDK's ReceiptVerifier. Its ReceiptVerification result canonicalizes
  * (JCS) identically to the TS output, asserted by the shared golden vectors.
  *
@@ -20,7 +20,7 @@ use Throwable;
  * signing key from the issuer/citizen DID document (by default one HTTPS resolution,
  * or supply the DID document(s) via an injected `resolver` for an air-gapped verify).
  * IPFS/anchor are the opt-in extra calls. When a DID cannot be resolved the affected
- * check is reported "unavailable" (inconclusive) — never "fail" (a real tamper).
+ * check is reported "unavailable" (inconclusive), never "fail" (a real tamper).
  *
  * A company-attested receipt is fully offline-sound (Ed25519 over the JCS body). A
  * VERBAL receipt (type VerbalConsentReceipt, assuranceLevel company_documented) is
@@ -36,20 +36,20 @@ use Throwable;
  * assertion IS checkable (passkey-possession over the committed challenge).
  *
  * SECURITY: the default did:web resolver fetches a host TAKEN FROM THE RECEIPT (it
- * can never yield a false "verified" — the key must still verify — but when
+ * can never yield a false "verified", the key must still verify, but when
  * verifying UNTRUSTED receipts, inject your own `resolver` or supply DID documents
  * locally to control the request surface). HTTPS is enforced (no http/file).
  *
  * Options (all network seams injectable, so tests run with NO network):
- *   - resolver:            callable(string $did): ?array  — DID document or null
+ *   - resolver:            callable(string $did): ?array: DID document or null
  *   - companyDidHost:      string (default app.agreely.ca, the Agreely WEB tier, which is what
  *                          serves /c/{slug}/did.json) for resolveCompanyDid
  *   - citizenResolverBaseUrl: string (default https://my.agreely.ca, the Agreely CITIZEN tier,
  *                          which is what serves /did/{did})
- *   - ipfsGateway:         callable(string $cid): string  — CID -> URL
- *   - httpGet:             callable(string $url): ?string — fetch body (IPFS)
- *   - httpPost:            callable(string $url, string $body): ?string — JSON-RPC
- *   - rpcUrl, registryAddress, chainId — opt-in on-chain documentAnchor
+ *   - ipfsGateway:         callable(string $cid): string: CID -> URL
+ *   - httpGet:             callable(string $url): ?string: fetch body (IPFS)
+ *   - httpPost:            callable(string $url, string $body): ?string: JSON-RPC
+ *   - rpcUrl, registryAddress, chainId: opt-in on-chain documentAnchor
  */
 final class ReceiptVerifier
 {
@@ -155,7 +155,7 @@ final class ReceiptVerifier
      * Is the human-readable cell label (category/purpose) cryptographically bound?
      *
      * company_attested and company_documented: the labels sit INSIDE the Ed25519-signed body, so this
-     *   tracks companySignature — a mutation to any item's category/purpose/itemId
+     *   tracks companySignature, a mutation to any item's category/purpose/itemId
      *   breaks the signature (a genuine offline cross-check of the labels).
      * citizen: UNSUPPORTED offline. The receipt deliberately omits the salted
      *   commitment + Merkle root that bind the labels (unlinkability / crypto-
@@ -654,7 +654,7 @@ final class ReceiptVerifier
             return [];
         }
         if ($v === []) {
-            return []; // an empty JSON object {} decodes to [] — treat as empty object
+            return []; // an empty JSON object {} decodes to [], treat as empty object
         }
         return array_is_list($v) ? [] : $v; // a non-empty list is a JSON array, not an object
     }

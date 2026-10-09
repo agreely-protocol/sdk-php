@@ -58,7 +58,7 @@ final class ConsentRequestsExtraTest extends TestCase
     public function testCollectHonorsTheMaxPagesGuard(): void
     {
         $rec = $this->rec('0xloop');
-        // A page that always returns a next cursor — the guard must stop it.
+        // A page that always returns a next cursor, the guard must stop it.
         $page = MockHttpClient::json(200, ['requests' => [$rec], 'nextCursor' => '0xnext']);
         $http = new MockHttpClient([static fn (): RawResponse => $page]);
         $all = $this->client($http)->consentRequests()->collect(['maxPages' => 3]);

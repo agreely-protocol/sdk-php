@@ -107,7 +107,7 @@ final class IssuanceVectorTest extends TestCase
         $call = $http->calls[0];
         $this->assertSame($expect['method'], $call->method);
         $this->assertSame($expect['path'], $call->path());
-        // EXACT envelope: the body deep-equals the golden body — no items key,
+        // EXACT envelope: the body deep-equals the golden body, no items key,
         // no second document reference, nothing extra (TS<->PHP parity).
         $this->assertEquals($expect['body'], $call->body);
         $this->assertNotNull($call->header('Idempotency-Key'));

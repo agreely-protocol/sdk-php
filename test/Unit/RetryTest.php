@@ -63,7 +63,7 @@ final class RetryTest extends TestCase
             ]);
             $this->fail('expected the outage to surface (create is never retried)');
         } catch (AgreelyUnavailableError) {
-            // Exactly one attempt — a create that emails must NOT be auto-retried.
+            // Exactly one attempt, a create that emails must NOT be auto-retried.
             $this->assertCount(1, $http->calls);
         }
     }
