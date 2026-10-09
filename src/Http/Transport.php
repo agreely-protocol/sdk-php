@@ -15,7 +15,6 @@ use Agreely\Sdk\Errors\AgreelySweepTooFrequentError;
 use Agreely\Sdk\Errors\AgreelyUnavailableError;
 use Agreely\Sdk\Errors\AgreelyValidationError;
 use Agreely\Sdk\Errors\AgreelyVerbalDailyCapError;
-use Agreely\Sdk\Errors\AgreelyWithdrawalDailyCapError;
 use Agreely\Sdk\Errors\ErrorCode;
 
 /**
@@ -248,7 +247,6 @@ final class Transport
                         // The organisation's daily limit of verbal consents, not the minute window.
                         throw new AgreelyVerbalDailyCapError($message, ErrorCode::VERBAL_DAILY_CAP, 429, $retryAfter, null, $reason);
                     case ErrorCode::WITHDRAWAL_DAILY_CAP:
-                        throw new AgreelyWithdrawalDailyCapError($message, ErrorCode::WITHDRAWAL_DAILY_CAP, 429, $retryAfter, null, $reason);
                     case ErrorCode::HOLD_BUDGET_EXHAUSTED:
                     case ErrorCode::HOLD_RELEASE_CAP_REACHED:
                         throw new AgreelyDailyCapError($message, (string) $code, 429, $retryAfter, null, $reason);

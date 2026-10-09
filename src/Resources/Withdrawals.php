@@ -70,7 +70,7 @@ final class Withdrawals
      * AgreelyConflictError reason consent_lapsed (no longer in force: re-read
      * /v1/check, which names the consent in force, if any); 422 AgreelyValidationError
      * reason not_revocable (a cell that was never a consent ask), requested_at_*,
-     * invalid_*; 429 AgreelyWithdrawalDailyCapError (the organisation's rolling 24-hour
+     * invalid_*; 429 AgreelyDailyCapError code withdrawal_daily_cap (the organisation's rolling 24-hour
      * cap, no Retry-After: record further withdrawals from the customer record in
      * Agreely).
      *

@@ -9,7 +9,7 @@ use Agreely\Sdk\Errors\AgreelyConfigError;
 use Agreely\Sdk\Errors\AgreelyConflictError;
 use Agreely\Sdk\Errors\AgreelyNotFoundError;
 use Agreely\Sdk\Errors\AgreelyValidationError;
-use Agreely\Sdk\Errors\AgreelyWithdrawalDailyCapError;
+use Agreely\Sdk\Errors\AgreelyDailyCapError;
 use Agreely\Sdk\Errors\ErrorReason;
 use Agreely\Sdk\Test\Support\MockHttpClient;
 use Agreely\Sdk\Types\ConsentWithdrawal;
@@ -175,8 +175,9 @@ final class WithdrawalsTest extends TestCase
         ]);
         try {
             $this->client($http)->withdrawals()->record('c-1', self::REF, ['channel' => 'phone', 'operator' => 'a']);
-            $this->fail('expected AgreelyWithdrawalDailyCapError');
-        } catch (AgreelyWithdrawalDailyCapError $e) {
+            $this->fail('expected AgreelyDailyCapError');
+        } catch (AgreelyDailyCapError $e) {
+            $this->assertSame('withdrawal_daily_cap', $e->code);
             $this->assertSame(ErrorReason::DAILY_CAP, $e->reason);
             $this->assertNull($e->retryAfter);
         }

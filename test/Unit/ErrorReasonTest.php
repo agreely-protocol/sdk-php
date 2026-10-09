@@ -14,7 +14,6 @@ use Agreely\Sdk\Errors\AgreelyNotFoundError;
 use Agreely\Sdk\Errors\AgreelyRateLimitError;
 use Agreely\Sdk\Errors\AgreelyValidationError;
 use Agreely\Sdk\Errors\AgreelyVerbalDailyCapError;
-use Agreely\Sdk\Errors\AgreelyWithdrawalDailyCapError;
 use Agreely\Sdk\Errors\ErrorCode;
 use Agreely\Sdk\Errors\ErrorReason;
 use Agreely\Sdk\Test\Support\MockHttpClient;
@@ -111,7 +110,7 @@ final class ErrorReasonTest extends TestCase
     {
         $cases = [
             ErrorCode::VERBAL_DAILY_CAP => AgreelyVerbalDailyCapError::class,
-            ErrorCode::WITHDRAWAL_DAILY_CAP => AgreelyWithdrawalDailyCapError::class,
+            ErrorCode::WITHDRAWAL_DAILY_CAP => AgreelyDailyCapError::class,
             ErrorCode::HOLD_BUDGET_EXHAUSTED => AgreelyDailyCapError::class,
             ErrorCode::HOLD_RELEASE_CAP_REACHED => AgreelyDailyCapError::class,
         ];

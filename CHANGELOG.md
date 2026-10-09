@@ -30,10 +30,10 @@ same surface under the same names.
   values, `ErrorCode` the known codes (the registry, holds, dispositions and inventory
   carry their stable string in `code`), and `$e->hasReason()` compares one. An unknown
   future reason is readable as a plain string and never throws.
-- **`AgreelyDailyCapError`**, the rolling 24-hour caps, never auto-retried:
-  `AgreelyWithdrawalDailyCapError` (`withdrawal_daily_cap`, new),
-  `AgreelyVerbalDailyCapError` (now a subclass of it), and the hold caps
-  `hold_budget_exhausted` and `hold_release_cap_reached`.
+- **`AgreelyDailyCapError`**, the rolling 24-hour caps, never auto-retried: the
+  withdrawal cap (`withdrawal_daily_cap`, reason `daily_cap`), the hold caps
+  (`hold_budget_exhausted`, `hold_release_cap_reached`), and `AgreelyVerbalDailyCapError`,
+  now a subclass of it. `$e->code` says which cap.
 - **`validUntil` and `revokedAt` on `CheckResult` and `BatchDecision`**: the end of the
   consent backing the answer and, on `revoked`, the withdrawal instant. Null when there
   is no consent record (the keys are absent from the wire). `validUntil` is an upper

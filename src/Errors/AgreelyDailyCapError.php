@@ -10,7 +10,8 @@ namespace Agreely\Sdk\Errors;
  * them, and most carry no Retry-After. `code` says which one ({@see ErrorCode}):
  *
  *   verbal_daily_cap          telephone consents recorded            ({@see AgreelyVerbalDailyCapError})
- *   withdrawal_daily_cap      withdrawals recorded over /v1           ({@see AgreelyWithdrawalDailyCapError})
+ *   withdrawal_daily_cap      withdrawals recorded over /v1 (reason daily_cap, no
+ *                             Retry-After: record further ones from the customer record)
  *   hold_budget_exhausted     retention holds placed over /v1
  *   hold_release_cap_reached  holds your system did not place, released over /v1
  *

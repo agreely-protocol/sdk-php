@@ -527,7 +527,7 @@ $w->recordedOnBehalf; // always true; $w->assurance is always "company_attested"
   reference, and another customer's consentRef, all answer the same), 409
   `consent_lapsed` (it ended on its own date: re-read `/v1/check`), 422 `not_revocable`
   (the cell was never a consent ask), `requested_at_in_future`,
-  `requested_at_before_grant`, and the 429 `AgreelyWithdrawalDailyCapError` (at most 50
+  `requested_at_before_grant`, and the 429 `AgreelyDailyCapError` code `withdrawal_daily_cap` (at most 50
   per rolling 24 hours unless the operator set another value; no Retry-After; record
   further withdrawals from the customer record in Agreely). The SDK refuses a channel
   outside the list, an operator shaped like an email or a name, a `requestedAt` with no
@@ -847,9 +847,8 @@ an error**.
 | `AgreelyBillingInactiveError` | 402 - the company's Agreely subscription lapsed |
 | `AgreelyRateLimitError`     | 429 (`->retryAfter` seconds)          |
 | `AgreelySweepTooFrequentError` | 429 `sweep_too_frequent` - the per-(rule, hostSystem) 15-minute floor, a subclass of the above. NEVER auto-retried |
-| `AgreelyDailyCapError`      | 429 on a rolling 24-hour cap: `hold_budget_exhausted`, `hold_release_cap_reached`, and the two subclasses below. A subclass of the rate-limit error. NEVER auto-retried |
-| `AgreelyVerbalDailyCapError` | 429 `verbal_daily_cap` - the organisation's daily limit of verbal consents |
-| `AgreelyWithdrawalDailyCapError` | 429 `withdrawal_daily_cap` (reason `daily_cap`) - withdrawals recorded over /v1 in 24 hours. No Retry-After |
+| `AgreelyDailyCapError`      | 429 on a rolling 24-hour cap, `->code` says which: `withdrawal_daily_cap` (reason `daily_cap`, no Retry-After), `hold_budget_exhausted`, `hold_release_cap_reached`. A subclass of the rate-limit error. NEVER auto-retried |
+| `AgreelyVerbalDailyCapError` | 429 `verbal_daily_cap` - the organisation's daily limit of verbal consents, a subclass of `AgreelyDailyCapError` |
 | `AgreelyConflictError`      | 409. Code `retry` (`->isRetryable()`): a declaration lost a race, retry with the **same** Idempotency-Key. Code `conflict` (`->isStateConflict()`): the request contradicts the record's state, `->reason` says which; retrying changes nothing. Other codes name their state: `identity_held`, `identity_erased`, `already_released`, `already_minted`, `relationship_active` |
 | `AgreelyUnavailableError`   | 503 / network / timeout               |
 | `AgreelyConfigError`        | bad client config, or input refused before the wire call |
