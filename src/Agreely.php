@@ -280,22 +280,32 @@ final class Agreely
     }
 
     /**
-     * Verify a consent receipt OFFLINE-FIRST (the headline). Reports exactly what is
-     * PROVED vs merely trusted: a company-attested receipt is offline-sound; a citizen
-     * receipt is honestly PARTIAL offline, because its company half signed the OFFER,
-     * which the receipt omits for unlinkability. NO server endpoint re-checks that
-     * half; it travels only in the separate verification bundle Agreely issues with the
-     * receipt, which this verifier does not read. "Offline-first", not fully offline: the
+     * Verify a consent receipt or its verification bundle OFFLINE-FIRST (the headline).
+     * Reports exactly what is PROVED vs merely trusted. A recorded receipt (paper or
+     * telephone) is offline-sound: the company signed its body. A passkey consent is
+     * "verified" only from its bundle (receipt, signedOffer, merkleRoot): the company
+     * signature over the offer, the receipt matched against it, and the passkey
+     * challenge recomputed from both. A bare passkey receipt reads "incomplete", its
+     * assertion "unbound": verify the bundle. "Offline-first", not fully offline: the
      * signature/assertion checks need the signing key from the DID document (one HTTPS
      * resolution by default, or supply a local `resolver` for an air-gapped verify);
-     * IPFS/anchor are the opt-in extra calls. When a DID cannot be resolved the check
-     * is "unavailable" (inconclusive), never "fail" (a tamper). Static, no API key.
+     * IPFS (`verifyDisclosure`) and the chain (`rpcUrl`) are the opt-in extra calls.
+     * When a check cannot complete it is "unavailable" (inconclusive), never "fail"
+     * (a tamper). Static, no API key.
      *
-     * SECURITY: when verifying UNTRUSTED receipts, inject your own `resolver` (or
-     * supply DID documents locally), the default did:web resolver fetches a host
-     * taken from the receipt (HTTPS-only; it can never yield a false "verified").
+     * SECURITY: the default did:web resolver fetches, over HTTPS, whatever host the
+     * receipt names. A verified signature then proves the receipt was signed by a key
+     * that host publishes, not that the host is the organisation you expect: a forger
+     * who controls a domain can issue a receipt under it that verifies. For receipts
+     * you did not fetch yourself, inject your own `resolver` that pins the issuers you
+     * trust (or supply DID documents locally). The citizen half is checked only for a
+     * did:agreely:citizen: subject, whatever the resolver.
      *
-     * @param mixed $receipt a parsed receipt VC (assoc array)
+     * Returns on any input: a file it cannot read (another bundle version, a non-object
+     * receipt or offer, a number, nesting past 64 levels) reads "malformed", never a throw.
+     *
+     * @param mixed $receipt a receipt VC or verification bundle: its JSON text (read exactly as written), what
+     *                       json_decode() returns, or an array
      * @param array<string,mixed> $opts see {@see ReceiptVerifier}
      */
     public static function verifyReceipt(mixed $receipt, array $opts = []): ReceiptVerification

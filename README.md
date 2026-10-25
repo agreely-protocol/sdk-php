@@ -1102,6 +1102,39 @@ new Agreely(['apiKey' => $key, 'httpClient' => $myClient]);
   on her behalf; `holds` (never granted by default) reads the feed of the holds in
   place. `identity()` returns whatever the server sends, so a scope added later can
   reach you at runtime.
+- **Receipt verification.** `Agreely::verifyReceipt` takes the verification
+  bundle a passkey consent issues (`version "1"`: the receipt, its `signedOffer`
+  and its `merkleRoot`) or a receipt file, as its JSON text, as the objects
+  `json_decode()` returns, or as an array. An array decoded with
+  `json_decode($text, true)` holds no difference between a JSON object keyed
+  `"0"` and a list, so pass the text to have the file read exactly as written.
+  The `resolver` gives the same advice: return the DID document as its JSON text
+  (or as objects) to have it read exactly as published. An array is accepted
+  with the same limit. A passkey (`citizen`) consent is `verified` only from its
+  bundle, once every one of these holds: the company signature over the offer;
+  the receipt matched against that offer, with its acceptance date (`grantedAt`)
+  inside the offer's window, from `createdAt` to `expiresAt`; the passkey
+  assertion bound to its content; and the citizen's DID document confirming that
+  key, listed under `authentication` with a validity window
+  `[validFrom, validUntil)` that covers `grantedAt`. A document that does not
+  confirm the key reads `failed`, and one that cannot be read as that identity's
+  document reads `unavailable`. An acceptance date outside the offer's window
+  fails the receipt's integrity and leaves the passkey assertion `unavailable`:
+  the person's key is not evaluated at that date. With `rpcUrl`, the consent
+  anchor passes once every cell's on-chain record was read under the bundle's
+  Merkle root, and reads `unavailable` while a cell is not yet recorded. A bare
+  passkey receipt proves nothing on its own: its assertion reads `unbound`,
+  `overall` reads `incomplete`, and the notes say to verify the bundle. A
+  `company_attested` paper receipt is `verified` when sound, bare or wrapped. A
+  `company_documented` verbal `VerbalConsentReceipt` has its company signature
+  verified, but `overall` is at most `partial`, because the organisation's word
+  is all there is. The disclosure-copy check is opt-in
+  (`'verifyDisclosure' => true`). The citizen half is checked only for a
+  `did:agreely:citizen:` subject, whatever the resolver. A file the verifier
+  cannot read (another bundle version, a non-object receipt or offer, nesting
+  past 64 levels) reads `malformed`, never a throw. The on-chain checks
+  (`rpcUrl`) share one deadline, `'rpcDeadlineMs'` (default 30000), past which
+  they read `unavailable`.
 
 ## Open and auditable
 
@@ -1115,7 +1148,8 @@ MIT-licensed and built to be provable, not just trusted:
   verifier additionally contacts a chain RPC you pass in (on-chain anchor) and an
   IPFS gateway (default `gateway.lighthouse.storage`, overridable) for the opt-in
   disclosure-copy check; its `did:web` resolver fetches the issuer host named in
-  the receipt over HTTPS. Resolving a citizen DID calls the Agreely CITIZEN tier
+  the receipt over HTTPS (inject your own `resolver` for untrusted receipts).
+  Resolving a citizen DID calls the Agreely CITIZEN tier
   (default `https://my.agreely.ca/did/{did}`), and `resolveCompanyDid` calls the
   Agreely WEB tier (default `https://app.agreely.ca/c/{slug}/did.json`); both are
   overridable, and injecting your own `resolver` removes them entirely.

@@ -80,11 +80,60 @@ final class ReceiptVerificationTest extends TestCase
         }
         if (($case['ipfs'] ?? false) === true) {
             $body = (string) json_encode(self::rv()['fixtures']['ipfsBody']);
+            $opts['verifyDisclosure'] = true;
             $opts['ipfsGateway'] = static fn (string $cid): string => "https://ipfs.test/{$cid}";
             $opts['httpGet'] = static fn (string $url): string => $body;
         }
 
         $result = Agreely::verifyReceipt($case['receipt'], $opts);
+
+        $canon = new Canonicalizer();
+        $this->assertSame(
+            $canon->encode($case['expect']),
+            $canon->encode($result->toArray()),
+            'ReceiptVerification drifted from the golden vector (TS<->PHP parity).',
+        );
+    }
+
+    /**
+     * @return iterable<string,array{0:array<string,mixed>}>
+     */
+    public static function bundleCaseProvider(): iterable
+    {
+        /** @var array<string,mixed> $data */
+        $data = json_decode((string) file_get_contents(dirname(__DIR__, 2) . '/vectors/vectors.json'), true);
+        /** @var array{cases: list<array<string,mixed>>} $bv */
+        $bv = $data['bundleVerification'];
+        foreach ($bv['cases'] as $case) {
+            yield Wire::str($case['name']) => [$case];
+        }
+    }
+
+    /**
+     * The real artefacts (genuine bundles, recorded receipts, the forgeries 0.5.0 accepted), byte-identical to TS.
+     *
+     * @param array<string,mixed> $case
+     */
+    #[DataProvider('bundleCaseProvider')]
+    public function testBundleVerificationMatchesTheGoldenVectorByteForByte(array $case): void
+    {
+        $dir = dirname(__DIR__, 2) . '/vectors/';
+        /** @var array<string,array<string,mixed>> $docs */
+        $docs = json_decode((string) file_get_contents($dir . 'receipts/did-documents.json'), true);
+        $opts = [
+            'resolver' => ($case['resolveDids'] ?? null) === 'none'
+                ? static fn (string $did): ?array => null
+                : static fn (string $did): ?array => $docs[$did] ?? null,
+        ];
+        if (array_key_exists('ipfsBody', $case)) {
+            $body = (string) json_encode($case['ipfsBody']);
+            $opts['verifyDisclosure'] = true;
+            $opts['ipfsGateway'] = static fn (string $cid): string => "https://ipfs.test/{$cid}";
+            $opts['httpGet'] = static fn (string $url): string => $body;
+        }
+
+        $input = json_decode((string) file_get_contents($dir . Wire::str($case['file'])), true);
+        $result = Agreely::verifyReceipt($input, $opts);
 
         $canon = new Canonicalizer();
         $this->assertSame(
@@ -144,7 +193,7 @@ final class ReceiptVerificationTest extends TestCase
             'resolver' => static fn (string $did): ?array => $docs[$did] ?? null,
             'ipfsGateway' => static fn (string $cid): string => "https://ipfs.test/{$cid}",
             'httpGet' => static fn (string $url): string => $body,
-            'httpPost' => static fn (string $url, string $b): string => (string) json_encode(['result' => [['blockNumber' => '0x1']]]),
+            'httpPost' => self::chainPost(),
             'rpcUrl' => 'https://rpc.test',
             // Base Sepolia (84532) is no longer the default; passing it explicitly still
             // resolves the known testnet registry, so an integrator can test on Sepolia.
@@ -167,11 +216,9 @@ final class ReceiptVerificationTest extends TestCase
             'resolver' => static fn (string $did): ?array => $docs[$did] ?? null,
             'ipfsGateway' => static fn (string $cid): string => "https://ipfs.test/{$cid}",
             'httpGet' => static fn (string $url): string => $body,
-            'httpPost' => static function (string $url, string $b) use (&$anchorRequestBody): string {
+            'httpPost' => self::chainPost(static function (string $b) use (&$anchorRequestBody): void {
                 $anchorRequestBody = $b;
-
-                return (string) json_encode(['result' => [['blockNumber' => '0x1']]]);
-            },
+            }),
             'rpcUrl' => 'https://rpc.test',
         ]);
 
@@ -232,19 +279,38 @@ final class ReceiptVerificationTest extends TestCase
             'resolver' => static fn (string $did): ?array => $docs[$did] ?? null,
             'ipfsGateway' => static fn (string $cid): string => "https://ipfs.test/{$cid}",
             'httpGet' => static fn (string $url): string => $body,
-            'httpPost' => static function (string $url, string $b) use (&$sent): string {
+            'httpPost' => self::chainPost(static function (string $b) use (&$sent): void {
                 /** @var array<string,mixed> $decoded */
                 $decoded = json_decode($b, true);
                 /** @var list<array<string,mixed>> $params */
                 $params = $decoded['params'];
                 $sent = Wire::str($params[0]['address'] ?? null);
-
-                return (string) json_encode(['result' => []]);
-            },
+            }, []),
             'rpcUrl' => 'https://rpc.test',
         ]);
 
         return $sent;
+    }
+
+    /**
+     * A JSON-RPC endpoint stub that answers by method: the head for eth_blockNumber, `$logs` for eth_getLogs.
+     * `$onLogs` sees each eth_getLogs request body.
+     *
+     * @param list<mixed> $logs
+     */
+    private static function chainPost(?callable $onLogs = null, array $logs = [['blockNumber' => '0x1']]): callable
+    {
+        return static function (string $url, string $b) use ($onLogs, $logs): string {
+            /** @var array<string,mixed> $req */
+            $req = json_decode($b, true);
+            if (($req['method'] ?? null) === 'eth_blockNumber') {
+                return (string) json_encode(['jsonrpc' => '2.0', 'id' => 1, 'result' => '0x3000000']);
+            }
+            if ($onLogs !== null) {
+                $onLogs($b);
+            }
+            return (string) json_encode(['jsonrpc' => '2.0', 'id' => 1, 'result' => $logs]);
+        };
     }
 
     private static function eip55(string $address): string
@@ -440,7 +506,7 @@ final class ReceiptVerificationTest extends TestCase
         $this->assertSame('failed', $result->overall);
     }
 
-    public function testAReceiptBodyHoldingANumberFailsTheCompanySignatureAndDoesNotThrow(): void
+    public function testAReceiptBodyHoldingANumberIsMalformedAndDoesNotThrow(): void
     {
         $docs = self::didDocuments();
         $receipt = self::companyReceipt();
@@ -452,7 +518,8 @@ final class ReceiptVerificationTest extends TestCase
         $result = Agreely::verifyReceipt($receipt, [
             'resolver' => static fn (string $did): ?array => $docs[$did] ?? null,
         ]);
-        $this->assertSame('fail', $result->companySignature);
+        $this->assertSame('malformed', $result->overall);
+        $this->assertSame('company_attested', $result->receiptType);
         $this->assertStringContainsString('the receipt body cannot be canonicalized', implode("\n", $result->notes));
     }
 
@@ -553,8 +620,8 @@ final class ReceiptVerificationTest extends TestCase
         $this->assertSame('partial', $result->overall, 'a telephone consent is never "verified"');
         $matched = false;
         foreach ($result->notes as $note) {
-            $documented = str_contains($note, 'documented a telephone consent under script version script-2026.09');
-            if ($documented && str_contains($note, 'no signed paper')) {
+            $documented = str_contains($note, 'documented a consent given by telephone under script version script-2026.09');
+            if ($documented && str_contains($note, 'there is no signed document')) {
                 $matched = true;
             }
             $this->assertStringNotContainsString('hand-signed PDF', $note);
