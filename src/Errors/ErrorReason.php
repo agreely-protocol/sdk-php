@@ -95,6 +95,10 @@ final class ErrorReason
     public const REQUESTED_AT_IN_FUTURE = 'requested_at_in_future';
     public const REQUESTED_AT_BEFORE_GRANT = 'requested_at_before_grant';
     public const INVALID_REASON = 'invalid_reason';
+    // Another consent of the purpose runs and the scope did not say whether the withdrawal covers it: the error
+    // ({@see AgreelyOtherConsentsRunningError}) lists them. A selected alsoWithdraw ref that is no such consent is the other.
+    public const OTHER_CONSENTS_RUNNING = 'other_consents_running';
+    public const NOT_RUNNING_FOR_PURPOSE = 'not_running_for_purpose';
 
     // A daily cap (429): on the verbal record, and on the withdrawal.
     public const DAILY_CAP = 'daily_cap';

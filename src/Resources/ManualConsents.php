@@ -31,6 +31,9 @@ final class ManualConsents
     /** The members a consent-sheet request accepts, and no others. */
     private const SHEET_MEMBERS = ['documentVersionId', 'locale'];
 
+    /** The members a revoke or an erase accepts, and no others. */
+    private const REVOKE_MEMBERS = ['reason', 'otherConsents'];
+
     /** The members a paper record accepts, and no others. */
     private const RECORD_MEMBERS = [
         'customerId', 'documentVersionId', 'effectiveDate', 'validUntil', 'items', 'evidence',
@@ -204,16 +207,20 @@ final class ManualConsents
      * A withdrawal attaches to the PURPOSE: every other consent still running for it (a
      * renewal and the paper it renewed, a newer sheet and the one it replaced) is
      * withdrawn at the same instant. When the person later signed the same purpose
-     * online with her passkey, that signed consent holds the gate and this route never
-     * ends it: AgreelyConflictError (409, reason citizen_consent_at_gate), nothing
-     * written. Record her withdrawal with withdrawals()->record() (scope 'withdraw')
-     * instead, which withdraws both at one instant.
+     * online with her passkey, that signed consent holds the gate: AgreelyConflictError
+     * (409, reason citizen_consent_at_gate), nothing written, UNLESS you declare
+     * `otherConsents: 'keep'`. Then this record and its chain end, the signed consent
+     * stays in force, and `stillInForce` on the result is true. `'withdraw'` changes
+     * nothing on this route: while the signed consent holds the purpose it is the same
+     * 409 as no declaration. To end her signed consent, record her withdrawal with
+     * withdrawals()->record() (scope 'withdraw') instead, which withdraws both at one instant.
      *
-     * @param array{reason?:string} $input
+     * @param array{reason?:string,otherConsents?:'keep'|'withdraw'} $input
      */
     public function revoke(string $consentRef, array $input = []): ManualConsentRevocation
     {
-        $body = [];
+        HostInput::closed($input, self::REVOKE_MEMBERS, 'manualConsents.revoke');
+        $body = self::otherConsentsBody($input, 'manualConsents.revoke');
         if (isset($input['reason'])) {
             $body['reason'] = $input['reason'];
         }
@@ -237,14 +244,17 @@ final class ManualConsents
      * force WITHDRAWS (never erases) every other consent running for the same purpose,
      * and `gate` on the result says what /v1/check does now. While a consent the person
      * signed online holds the purpose it is a 409 (reason citizen_consent_at_gate) and
-     * nothing is written: record her withdrawal with withdrawals()->record() first,
-     * then erase.
+     * nothing is written, UNLESS you declare `otherConsents: 'keep'`: the erasure then
+     * ends this record and its chain, the signed consent stays in force, and `stillInForce`
+     * on the result is true. `'withdraw'` changes nothing here (the same 409 as no
+     * declaration): record her withdrawal with withdrawals()->record() first, then erase.
      *
-     * @param array{reason?:string} $input
+     * @param array{reason?:string,otherConsents?:'keep'|'withdraw'} $input
      */
     public function erase(string $consentRef, array $input = []): ManualConsentErasure
     {
-        $body = [];
+        HostInput::closed($input, self::REVOKE_MEMBERS, 'manualConsents.erase');
+        $body = self::otherConsentsBody($input, 'manualConsents.erase');
         if (isset($input['reason'])) {
             $body['reason'] = $input['reason'];
         }
@@ -257,6 +267,25 @@ final class ManualConsents
         ));
 
         return ManualConsentErasure::fromWire($wire);
+    }
+
+    /**
+     * The one scope /revoke and /erase take: otherConsents "keep" or "withdraw", as the exact JSON string, or nothing.
+     *
+     * @param array<string,mixed> $input
+     * @return array<string,string>
+     * @throws AgreelyConfigError
+     */
+    private static function otherConsentsBody(array $input, string $label): array
+    {
+        $others = $input['otherConsents'] ?? null;
+        if ($others === null) {
+            return [];
+        }
+        if ($others !== 'keep' && $others !== 'withdraw') {
+            throw new AgreelyConfigError("{$label}: otherConsents must be \"keep\" or \"withdraw\".");
+        }
+        return ['otherConsents' => $others];
     }
 
     /**

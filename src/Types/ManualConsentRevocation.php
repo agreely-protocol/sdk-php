@@ -23,11 +23,16 @@ final class ManualConsentRevocation
     public const GATE_SUPERSEDED = 'superseded';
     public const GATE_UNCHANGED  = 'unchanged';
 
+    /**
+     * `stillInForce` is true only when the call declared "keep" past a consent the person
+     * signed online for the purpose, which stays in force (the record ends, the consent does not).
+     */
     public function __construct(
         public readonly string $consentRef,
         public readonly bool $revoked,
         public readonly bool $alreadyRevoked,
         public readonly string $gate = '',
+        public readonly bool $stillInForce = false,
     ) {
     }
 
@@ -39,6 +44,7 @@ final class ManualConsentRevocation
             Wire::bool($wire['revoked'] ?? false),
             Wire::bool($wire['alreadyRevoked'] ?? false),
             Wire::str($wire['gate'] ?? null),
+            Wire::bool($wire['stillInForce'] ?? false),
         );
     }
 

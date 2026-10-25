@@ -30,8 +30,11 @@ final class Withdrawals
     /** The `reason` bound, mirrored from the server. */
     public const REASON_MAX = 1000;
 
+    /** The most consentRefs `alsoWithdraw` names, mirrored from the server. */
+    public const SCOPE_MAX = 50;
+
     /** The members a withdrawal accepts, and no others. */
-    private const MEMBERS = ['channel', 'operator', 'requestedAt', 'reason'];
+    private const MEMBERS = ['channel', 'operator', 'requestedAt', 'reason', 'otherConsents', 'alsoWithdraw'];
 
     /** An opaque staff id: letters, digits and . _ : - only, so neither an email address nor prose fits. */
     private const OPERATOR = '/^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$/D';
@@ -56,8 +59,21 @@ final class Withdrawals
      *               never moves the withdrawal's own instant, which is the moment of the call.
      * - reason      optional free text, at most 1000 characters, no control character.
      *               Encrypted, destroyed on erasure, never on chain, never echoed back.
+     * - otherConsents  "withdraw" (every other consent of the purpose given at or before
+     *               requestedAt is withdrawn with this one) or "keep" (this one only).
+     * - alsoWithdraw   the consentRefs (0x-hex) of the other consents of the purpose the
+     *               person's withdrawal covers, at most {@see SCOPE_MAX}. [] declares nothing.
      *
-     * Read the result's `gate` ({@see ConsentWithdrawal}), never `withdrawn` alone.
+     * A WITHDRAWAL NEVER ENDS ANOTHER CONSENT OF THE PURPOSE ON ITS OWN. Its own chain (a
+     * renewal and the paper it renewed, a verbal consent and its confirming paper) goes
+     * with it, always. When another consent of the purpose is in force and the call declares
+     * neither otherConsents nor alsoWithdraw, the call is refused with
+     * {@see \Agreely\Sdk\Errors\AgreelyOtherConsentsRunningError}, which lists them in
+     * `otherConsentRefs`, and nothing is written: ask the person, then retry with one of the
+     * two. Pass otherConsents OR alsoWithdraw, never both, not even an empty alsoWithdraw.
+     *
+     * Read the result's `gate` ({@see ConsentWithdrawal}), never `withdrawn` alone, and its
+     * `stillInForce`, the refs of the other consents of the purpose the act did not reach.
      * IDEMPOTENT: a repeat answers `alreadyWithdrawn: true`, `gate: "unchanged"`. An
      * Idempotency-Key is generated per call unless you pass one in $options (1 to 255
      * printable ASCII characters), bound by the server to this endpoint and the body.
@@ -67,8 +83,10 @@ final class Withdrawals
      * unknown_consent (a missing, malformed or foreign consentRef, an unknown
      * customerRef, and a consentRef of ANOTHER customer all answer the same); 409
      * AgreelyConflictError reason consent_lapsed (no longer in force: re-read
-     * /v1/check, which names the consent in force, if any); 422 AgreelyValidationError
-     * reason not_revocable (a cell that was never a consent ask), requested_at_*,
+     * /v1/check, which names the consent in force, if any); 422 AgreelyOtherConsentsRunningError
+     * reason other_consents_running (see above); 422 AgreelyValidationError reason
+     * not_running_for_purpose (an alsoWithdraw ref that is no other consent in force of the
+     * purpose), not_revocable (a cell that was never a consent ask), requested_at_*,
      * invalid_*; 429 AgreelyDailyCapError code withdrawal_daily_cap (the organisation's rolling 24-hour
      * cap, no Retry-After: record further withdrawals from the customer record in
      * Agreely).
@@ -76,10 +94,12 @@ final class Withdrawals
      * REFUSED CLIENT-SIDE, before any wire call (AgreelyConfigError): a missing or
      * unknown channel, an operator shaped like an email or prose, a requestedAt with
      * no offset, a reason over 1000 characters or with a control character, a blank
-     * customerRef, a consentRef that is not 32 bytes of hex, and any member outside the
-     * four above.
+     * customerRef, a consentRef that is not 32 bytes of hex, an otherConsents that is
+     * not "keep" or "withdraw", both otherConsents and alsoWithdraw, an alsoWithdraw of
+     * more than 50 consentRefs or with one that is not 32 bytes of hex, and any member
+     * outside the six above.
      *
-     * @param array{channel:string,operator:string,requestedAt?:string|\DateTimeInterface,reason?:string} $input
+     * @param array{channel:string,operator:string,requestedAt?:string|\DateTimeInterface,reason?:string,otherConsents?:'keep'|'withdraw',alsoWithdraw?:list<string>} $input
      * @param array{idempotencyKey?:string} $options
      */
     public function record(string $customerRef, string $consentRef, array $input, array $options = []): ConsentWithdrawal
@@ -107,7 +127,32 @@ final class Withdrawals
             );
         }
 
+        $others = $input['otherConsents'] ?? null;
+        $listed = $input['alsoWithdraw'] ?? null;
+        if ($others !== null && $listed !== null) {
+            throw new AgreelyConfigError("{$label}: declare the scope once: otherConsents or alsoWithdraw, never both.");
+        }
+        if ($others !== null && $others !== 'keep' && $others !== 'withdraw') {
+            throw new AgreelyConfigError("{$label}: otherConsents must be \"keep\" or \"withdraw\".");
+        }
+        if ($listed !== null) {
+            if (!is_array($listed) || !array_is_list($listed) || count($listed) > self::SCOPE_MAX) {
+                throw new AgreelyConfigError("{$label}: alsoWithdraw must be a list of at most " . self::SCOPE_MAX . ' consentRefs.');
+            }
+            foreach ($listed as $one) {
+                if (!is_string($one) || preg_match(self::CONSENT_REF, trim($one)) !== 1) {
+                    throw new AgreelyConfigError("{$label}: every alsoWithdraw entry must be a 0x-prefixed 64-hex consentRef.");
+                }
+            }
+        }
+
         $body = ['channel' => $channel, 'operator' => $operator];
+        if ($others !== null) {
+            $body['otherConsents'] = $others;
+        }
+        if ($listed !== null) {
+            $body['alsoWithdraw'] = array_map(static fn (string $one): string => trim($one), $listed);
+        }
         if (array_key_exists('requestedAt', $input) && $input['requestedAt'] !== null) {
             $body['requestedAt'] = HostInput::instant($input['requestedAt'], "{$label}: requestedAt")['wire'];
         }

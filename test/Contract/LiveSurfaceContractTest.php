@@ -182,8 +182,9 @@ final class LiveSurfaceContractTest extends TestCase
         ]);
         $this->assertTrue($withdrawn->withdrawn);
         $this->assertTrue($withdrawn->recordedOnBehalf);
-        $this->assertSame('company_attested', $withdrawn->assurance);
+        $this->assertSame('company_documented', $withdrawn->assurance);
         $this->assertSame(ConsentWithdrawal::GATE_DENIED, $withdrawn->gate);
+        $this->assertSame([], $withdrawn->stillInForce);
 
         $after = $check->checkDetailed($ref, $issue['category'], $issue['purpose']);
         $this->assertSame('deny', $after->decision);

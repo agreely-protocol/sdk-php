@@ -10,6 +10,7 @@ use Agreely\Sdk\Errors\AgreelyConflictError;
 use Agreely\Sdk\Errors\AgreelyDailyCapError;
 use Agreely\Sdk\Errors\AgreelyError;
 use Agreely\Sdk\Errors\AgreelyNotFoundError;
+use Agreely\Sdk\Errors\AgreelyOtherConsentsRunningError;
 use Agreely\Sdk\Errors\AgreelyRateLimitError;
 use Agreely\Sdk\Errors\AgreelySweepTooFrequentError;
 use Agreely\Sdk\Errors\AgreelyUnavailableError;
@@ -231,6 +232,18 @@ final class Transport
                 throw new AgreelyAuthError($message, $code ?? 'unauthorized', $res->status, $field, null, $reason);
             case 400:
             case 422:
+                // The withdrawal's refusal names the consents it could not decide about, so the caller can ask the person.
+                if ($reason === ErrorReason::OTHER_CONSENTS_RUNNING) {
+                    throw new AgreelyOtherConsentsRunningError(
+                        $message,
+                        $code ?? 'invalid_request',
+                        $res->status,
+                        $field,
+                        null,
+                        $reason,
+                        $wire['otherConsentRefs'] ?? [],
+                    );
+                }
                 throw new AgreelyValidationError($message, $code ?? 'invalid_request', $res->status, $field, null, $reason);
             case 404:
                 throw new AgreelyNotFoundError($message, $code ?? 'not_found', $res->status, $field, null, $reason);
@@ -283,7 +296,7 @@ final class Transport
     }
 
     /**
-     * @return array{message?:string,code?:string,field?:string,reason?:string}
+     * @return array{message?:string,code?:string,field?:string,reason?:string,otherConsentRefs?:list<string>}
      */
     private function safeErrorEnvelope(string $body): array
     {
@@ -308,6 +321,9 @@ final class Transport
         }
         if (isset($err['reason']) && is_string($err['reason'])) {
             $out['reason'] = $err['reason'];
+        }
+        if (isset($err['otherConsentRefs']) && is_array($err['otherConsentRefs']) && array_is_list($err['otherConsentRefs'])) {
+            $out['otherConsentRefs'] = array_values(array_filter($err['otherConsentRefs'], 'is_string'));
         }
         return $out;
     }

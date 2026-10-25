@@ -169,6 +169,78 @@ final class ManualConsentsTest extends TestCase
         $this->assertSame('/v1/manual-consents/' . self::REF . '/erase', $http->calls[0]->path());
     }
 
+    public function testRevokeAndEraseSendTheDeclaredScopeAsTheExactString(): void
+    {
+        foreach (['keep', 'withdraw'] as $scope) {
+            $http = new MockHttpClient([
+                MockHttpClient::json(200, ['consentRef' => self::REF, 'revoked' => true, 'alreadyRevoked' => false]),
+            ]);
+            $this->client($http)->manualConsents()->revoke(self::REF, ['otherConsents' => $scope]);
+            $this->assertSame(['otherConsents' => $scope], $http->calls[0]->body, "revoke {$scope}");
+
+            $http = new MockHttpClient([
+                MockHttpClient::json(200, ['consentRef' => self::REF, 'erased' => true, 'alreadyErased' => false]),
+            ]);
+            $this->client($http)->manualConsents()->erase(self::REF, ['reason' => 'demande', 'otherConsents' => $scope]);
+            $this->assertSame(['otherConsents' => $scope, 'reason' => 'demande'], $http->calls[0]->body, "erase {$scope}");
+        }
+
+        $http = new MockHttpClient([
+            MockHttpClient::json(200, ['consentRef' => self::REF, 'revoked' => true, 'alreadyRevoked' => false]),
+        ]);
+        $this->client($http)->manualConsents()->revoke(self::REF);
+        $this->assertNull($http->calls[0]->body);
+    }
+
+    public function testAnOtherConsentsValueOutsideTheTwoIsRefusedBeforeTheCall(): void
+    {
+        foreach (['KEEP', true, ['keep'], '', 'none'] as $value) {
+            $http = new MockHttpClient([]);
+            try {
+                /** @phpstan-ignore argument.type (the point is a value the type forbids) */
+                $this->client($http)->manualConsents()->revoke(self::REF, ['otherConsents' => $value]);
+                $this->fail('expected AgreelyConfigError for ' . json_encode($value));
+            } catch (AgreelyConfigError) {
+                $this->assertCount(0, $http->calls);
+            }
+            try {
+                /** @phpstan-ignore argument.type (the point is a value the type forbids) */
+                $this->client($http)->manualConsents()->erase(self::REF, ['otherConsents' => $value]);
+                $this->fail('expected AgreelyConfigError for ' . json_encode($value));
+            } catch (AgreelyConfigError) {
+                $this->assertCount(0, $http->calls);
+            }
+        }
+    }
+
+    public function testAMisspeltMemberOfRevokeOrEraseIsRefusedNotDropped(): void
+    {
+        $http = new MockHttpClient([]);
+        try {
+            $this->client($http)->manualConsents()->erase(self::REF, ['otherConsent' => 'keep']);
+            $this->fail('expected AgreelyConfigError');
+        } catch (AgreelyConfigError) {
+            $this->assertCount(0, $http->calls);
+        }
+    }
+
+    public function testStillInForceIsTrueOnlyWhenTheKeptConsentSurvives(): void
+    {
+        $http = new MockHttpClient([
+            MockHttpClient::json(200, [
+                'consentRef' => self::REF, 'revoked' => true, 'alreadyRevoked' => false, 'gate' => 'superseded', 'stillInForce' => true,
+            ]),
+            MockHttpClient::json(200, ['consentRef' => self::REF, 'revoked' => true, 'alreadyRevoked' => false, 'gate' => 'denied']),
+            MockHttpClient::json(200, ['consentRef' => self::REF, 'erased' => true, 'alreadyErased' => false, 'stillInForce' => true]),
+            MockHttpClient::json(200, ['consentRef' => self::REF, 'erased' => true, 'alreadyErased' => false, 'gate' => 'denied']),
+        ]);
+        $client = $this->client($http);
+        $this->assertTrue($client->manualConsents()->revoke(self::REF, ['otherConsents' => 'keep'])->stillInForce);
+        $this->assertFalse($client->manualConsents()->revoke(self::REF)->stillInForce);
+        $this->assertTrue($client->manualConsents()->erase(self::REF, ['otherConsents' => 'keep'])->stillInForce);
+        $this->assertFalse($client->manualConsents()->erase(self::REF)->stillInForce);
+    }
+
     public function testCheckResultCarriesAssuranceFromWire(): void
     {
         $http = new MockHttpClient([

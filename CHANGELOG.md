@@ -4,6 +4,41 @@ All notable changes to `agreely/sdk` (PHP) are documented here. This project
 adheres to [Semantic Versioning](https://semver.org/). Packagist reads the git
 tag as the released version.
 
+## Unreleased
+
+### Breaking
+
+- **`manualConsents()->revoke()` and `erase()` take a CLOSED input.** A member other than
+  `reason` and `otherConsents` is refused before the call (`AgreelyConfigError`) instead of
+  being dropped, so a misspelt scope never reaches the server as "not declared".
+
+### Added
+
+- **`withdrawals()->record()` takes a declared scope**: `otherConsents` (`"withdraw"` or
+  `"keep"`) or `alsoWithdraw` (the 0x consentRefs of the other consents of the purpose the
+  withdrawal covers, at most 50). Both together, an `alsoWithdraw` over 50, or any other
+  value is refused before the call.
+- **`manualConsents()->revoke()` and `erase()` take `otherConsents`** (`"keep"` or
+  `"withdraw"`, the exact string). `"keep"` ends the record while a consent the person signed
+  online stays in force, and the answer says so with `stillInForce: true`.
+- **`AgreelyOtherConsentsRunningError`**, a subclass of `AgreelyValidationError` for the 422
+  `other_consents_running` a withdrawal answers when another consent of the purpose runs and
+  the call declared neither scope. `->otherConsentRefs` lists those consents, so the caller can
+  ask the person and retry.
+- `ErrorReason::OTHER_CONSENTS_RUNNING` and `ErrorReason::NOT_RUNNING_FOR_PURPOSE`.
+- `stillInForce` on `ConsentWithdrawal` (the 0x refs of the other consents of the purpose still
+  in force after the act, empty when none), and on `ManualConsentRevocation` and
+  `ManualConsentErasure` (a bool, true only when a kept consent survives).
+
+### Fixed
+
+- **A withdrawal's `assurance` is `company_documented`, never `company_attested`.** The
+  result's default and its docblock said `company_attested`, the manual-consent tier, which
+  the server never sends for a withdrawal.
+- **A withdrawal does not end the other consents of its purpose on its own.** The docs said it
+  did. Its own chain goes with it, always; any other consent of the purpose still running is
+  refused until the call declares it (`otherConsents` or `alsoWithdraw`).
+
 ## 0.5.0 - 2026-10-09
 
 Covers the whole production /v1 API as deployed on 2026-10-09. Every route the API

@@ -365,11 +365,16 @@ customer the company holds no record of, and `AgreelyConflictError` (reason
 same purpose already backs the gate, which **still allows**), or `unchanged` (an
 idempotent repeat). A withdrawal attaches to the **purpose**: withdrawing the manual
 cell that confirmed a verbal one withdraws that verbal cell too, and so is every other
-consent still running for it. `erase()` reports `->gate` the same way.
+consent still running for it. `erase()` reports `->gate` the same way. Both take an
+optional `otherConsents` of `"keep"` or `"withdraw"`, sent as the exact string; any other
+value is refused before the call.
 
 When the person later signed the same purpose **online with her passkey**, that
-signed consent holds the gate and `revoke()` / `erase()` never end it: they answer 409,
-reason `citizen_consent_at_gate`, and write nothing. Record her withdrawal with
+signed consent holds the gate: `revoke()` / `erase()` answer 409, reason
+`citizen_consent_at_gate`, and write nothing, unless you pass `otherConsents: 'keep'`.
+That ends this record and its chain while the signed consent stays in force, and the
+answer carries `stillInForce: true`. `'withdraw'` changes nothing on these two routes
+(the same 409 as no declaration). To end her signed consent, record her withdrawal with
 [`withdrawals()->record()`](#withdrawals-scope-withdraw), which withdraws both at one
 instant (then erase, if that is what was asked).
 
@@ -509,19 +514,43 @@ $w = $agreely->withdrawals()->record('cust_8812', $consentRef, [
     'reason'      => 'Ne souhaite plus recevoir l\'infolettre.', // optional, at most 1000 characters
 ]);
 $w->gate;            // "denied" | "superseded" | "unchanged": what /v1/check does now
-$w->alsoWithdrawn;   // the other consents of the purpose withdrawn at the same instant
-$w->recordedOnBehalf; // always true; $w->assurance is always "company_attested"
+$w->alsoWithdrawn;   // the consents withdrawn with it at the same instant
+$w->stillInForce;    // the 0x refs of the other consents of the purpose still in force after it
+$w->recordedOnBehalf; // always true; $w->assurance is always "company_documented"
 ```
 
 - **Honest by construction.** The answer always says `recordedOnBehalf: true` and
-  `assurance: "company_attested"`: Agreely records that the organisation says it
+  `assurance: "company_documented"`: Agreely records that the organisation says it
   received and actioned the request; it did not witness it, and it is never the
   person's own signature. The answer is the same whatever the consent's tier.
-- **A withdrawal attaches to the purpose.** The other consents of the purpose still
-  running in its chain (a renewal and the paper it renewed, a telephone consent and its
-  paper, and a consent she signed online at or before `requestedAt`) are withdrawn at
-  the same instant and listed in `alsoWithdrawn`. Read `gate`, never `withdrawn` alone:
-  `superseded` means another consent still holds the gate.
+- **A withdrawal never ends another consent of the purpose on its own.** Its own chain
+  (a renewal and the paper it renewed, a telephone consent and its paper) is withdrawn
+  with it at the same instant, always. Any other consent of the purpose still running, a
+  consent she signed online at or before `requestedAt` included, is refused with
+  `AgreelyOtherConsentsRunningError` (422, reason `other_consents_running`) and nothing is
+  written. Its `otherConsentRefs` lists every one of them: ask the person which ones her
+  withdrawal covers, then retry with exactly one of the two declarations below.
+  Read `gate`, never `withdrawn` alone: `superseded` means another consent still holds the gate.
+- **Declare the scope, once.** `otherConsents: "withdraw"` withdraws every other consent
+  of the purpose given at or before `requestedAt`; `otherConsents: "keep"` withdraws this
+  one only. `alsoWithdraw` lists the 0x consentRefs (at most 50) the withdrawal covers
+  among them; `[]` declares nothing. Sending `otherConsents` beside `alsoWithdraw`, even
+  an empty one, is refused before the call (`AgreelyConfigError`).
+
+```php
+use Agreely\Sdk\Errors\AgreelyOtherConsentsRunningError;
+
+try {
+    $agreely->withdrawals()->record('cust_8812', $consentRef, ['channel' => 'phone', 'operator' => 'intervenant-0042']);
+} catch (AgreelyOtherConsentsRunningError $e) {
+    // Ask her which of $e->otherConsentRefs her withdrawal covers, then retry with one declaration:
+    $agreely->withdrawals()->record('cust_8812', $consentRef, [
+        'channel' => 'phone',
+        'operator' => 'intervenant-0042',
+        'alsoWithdraw' => ['0x…', '0x…'], // or 'otherConsents' => 'withdraw' (all of them), or 'keep' (this one only)
+    ]);
+}
+```
 - **Its own scope**, never pre-ticked and never implied by `attest`, because it is the
   only /v1 door to a consent the person signed. Ask for it explicitly.
 - **The one route a company behind on its payments keeps**: honouring a withdrawal is a
@@ -532,7 +561,8 @@ $w->recordedOnBehalf; // always true; $w->assurance is always "company_attested"
   reference, and another customer's consentRef, all answer the same), 409
   `consent_lapsed` (it ended on its own date: re-read `/v1/check`), 422 `not_revocable`
   (the cell was never a consent ask), `requested_at_in_future`,
-  `requested_at_before_grant`, and the 429 `AgreelyDailyCapError` code `withdrawal_daily_cap` (at most 50
+  `requested_at_before_grant`, `not_running_for_purpose` (an `alsoWithdraw` ref that is no
+  other consent in force of the purpose), the 422 `other_consents_running` above, and the 429 `AgreelyDailyCapError` code `withdrawal_daily_cap` (at most 50
   per rolling 24 hours unless the operator set another value; no Retry-After; record
   further withdrawals from the customer record in Agreely). The SDK refuses a channel
   outside the list, an operator shaped like an email or a name, a `requestedAt` with no
@@ -854,6 +884,7 @@ an error**.
 | --------------------------- | ------------------------------------- |
 | `AgreelyAuthError`          | 401 unauthorized / 403 forbidden      |
 | `AgreelyValidationError`    | 400 / 422 (`->field` names the input) |
+| `AgreelyOtherConsentsRunningError` | 422 `other_consents_running` on a withdrawal, a subclass of the validation error. `->otherConsentRefs` lists the 0x consentRefs of the other consents of the purpose still in force, to ask the person about. NEVER auto-retried |
 | `AgreelyNotFoundError`      | 404                                   |
 | `AgreelyBillingInactiveError` | 402 - the company's Agreely subscription lapsed |
 | `AgreelyRateLimitError`     | 429 (`->retryAfter` seconds). Code `rate_limited` is the per-minute window, the only 429 ever auto-retried; any other code it does not know is kept as sent and never retried |

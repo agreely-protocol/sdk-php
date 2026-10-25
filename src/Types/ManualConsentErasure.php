@@ -15,11 +15,16 @@ namespace Agreely\Sdk\Types;
  */
 final class ManualConsentErasure
 {
+    /**
+     * `stillInForce` is true only when the call declared "keep" past a consent the person
+     * signed online for the purpose, which stays in force (the record ends, the consent does not).
+     */
     public function __construct(
         public readonly string $consentRef,
         public readonly bool $erased,
         public readonly bool $alreadyErased,
         public readonly string $gate = '',
+        public readonly bool $stillInForce = false,
     ) {
     }
 
@@ -31,6 +36,7 @@ final class ManualConsentErasure
             Wire::bool($wire['erased'] ?? false),
             Wire::bool($wire['alreadyErased'] ?? false),
             Wire::str($wire['gate'] ?? null),
+            Wire::bool($wire['stillInForce'] ?? false),
         );
     }
 
