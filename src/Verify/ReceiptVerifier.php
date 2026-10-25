@@ -299,6 +299,10 @@ final class ReceiptVerifier
     }
 
     /**
+     * BOTH types: fetch the IPFS document body and match its disclosure to disclosureHash. The preimage is
+     * versioned by the receipt's disclosureVersion, exactly as ConsentRequestService seals it: v2 hashes
+     * {disclosure, legalBasis}; v1 (or absent) hashes the disclosure map alone.
+     *
      * @param array<array-key,mixed> $r
      * @param list<string> $notes
      */
@@ -326,14 +330,61 @@ final class ReceiptVerifier
         }
         /** @var mixed $body */
         $body = json_decode($bodyText, true);
+        // The pinned IPFS body wraps the disclosure map under `disclosure`. It carries NO legalBasis today
+        // (IpfsDocumentService::canonicalPayload), so a v2 basis map comes from the receipt, under the company's
+        // signature, and is checked against the hash. If a body ever carries one, it must agree with the receipt.
         $disclosure = self::asObject(self::asObject($body)['disclosure'] ?? null);
-        $computed = '0x' . hash('sha256', $this->canonicalizer->encode($disclosure));
+
+        // A declared disclosureVersion of null is unknown, not absent: only a missing key means v1.
+        $versionDeclared = array_key_exists('disclosureVersion', $consent);
+        $version = $consent['disclosureVersion'] ?? null;
+        $receiptBasis = $consent['legalBasis'] ?? null;
+
+        if ($versionDeclared && $version !== '1' && $version !== '2') {
+            $notes[] = 'disclosureCopy FAILED: the receipt declares an unknown disclosureVersion, so its preimage is not defined.';
+            return 'fail';
+        }
+        if ($version !== '2' && $receiptBasis !== null) {
+            $notes[] = 'disclosureCopy FAILED: the receipt carries a legalBasis but no disclosureVersion 2, so the preimage it hashes is ambiguous.';
+            return 'fail';
+        }
+
+        if ($version === '2') {
+            // A v2 receipt is never checked with the v1 formula: a missing basis fails here, it does not fall back.
+            // array_is_list([]) is true, so an empty map is refused too: the app seals v2 only over a non-empty map.
+            if (!is_array($receiptBasis) || array_is_list($receiptBasis)) {
+                $notes[] = 'disclosureCopy FAILED (disclosureVersion 2): the receipt declares a v2 disclosureHash but carries no legalBasis map, so the preimage cannot be rebuilt.';
+                return 'fail';
+            }
+            $bodyObject = self::asObject($body);
+            if (array_key_exists('legalBasis', $bodyObject)
+                && $this->canonicalizer->encode($bodyObject['legalBasis']) !== $this->canonicalizer->encode($receiptBasis)) {
+                $notes[] = "disclosureCopy FAILED (disclosureVersion 2): the IPFS document body carries a legalBasis that differs from the receipt's.";
+                return 'fail';
+            }
+            $computedV2 = $this->disclosureHashOf(['disclosure' => $disclosure, 'legalBasis' => $receiptBasis]);
+            if ($computedV2 === $disclosureHash) {
+                $notes[] = "Disclosure copy verified (disclosureVersion 2: {disclosure, legalBasis}): the IPFS document body and the receipt legalBasis match the receipt disclosureHash {$disclosureHash}.";
+                return 'pass';
+            }
+            $notes[] = "disclosureCopy FAILED (disclosureVersion 2): the IPFS document body and the receipt legalBasis hash to {$computedV2}, not the receipt disclosureHash {$disclosureHash}.";
+            return 'fail';
+        }
+
+        // v1 (or absent): the preimage is the disclosure map alone.
+        $computed = $this->disclosureHashOf($disclosure);
         if ($computed === $disclosureHash) {
             $notes[] = "Disclosure copy verified: the IPFS document body matches the receipt disclosureHash {$disclosureHash}.";
             return 'pass';
         }
         $notes[] = "disclosureCopy FAILED: the IPFS document body hashes to {$computed}, not the receipt disclosureHash {$disclosureHash}.";
         return 'fail';
+    }
+
+    /** "0x" + sha256(JCS(preimage)): the disclosureHash formula the app seals (ConsentRequestService). */
+    private function disclosureHashOf(mixed $preimage): string
+    {
+        return '0x' . hash('sha256', $this->canonicalizer->encode($preimage));
     }
 
     /**

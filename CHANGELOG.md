@@ -38,6 +38,10 @@ tag as the released version.
 - **A withdrawal does not end the other consents of its purpose on its own.** The docs said it
   did. Its own chain goes with it, always; any other consent of the purpose still running is
   refused until the call declares it (`otherConsents` or `alsoWithdraw`).
+- **`verifyReceipt` recomputes a v2 `disclosureHash` over `{disclosure, legalBasis}`** when the
+  receipt declares `disclosureVersion: "2"`. Every authentic v2 receipt (a cell on a non-consent
+  basis) used to report `disclosureCopy` as `fail`. A v2 receipt without its `legalBasis` now
+  fails rather than falling back to the v1 formula.
 
 ## 0.5.0 - 2026-10-09
 
