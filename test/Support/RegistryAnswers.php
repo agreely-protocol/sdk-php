@@ -11,7 +11,7 @@ namespace Agreely\Sdk\Test\Support;
 final class RegistryAnswers
 {
     /** The AgreelyRegistry the SDK reads by default on Base Sepolia (84532), EIP-55 checksummed. */
-    public const SEPOLIA_REGISTRY = '0xAf170eA0F66279104D5CF25d7938bBe7A4173e61';
+    public const SEPOLIA_REGISTRY = '0xf25D3F8E73648C797Be2CCCD428061f357567b9A';
 
     /**
      * The bundle with its issuer delegation naming the readable Sepolia registry instead of the emit-only one the

@@ -11,7 +11,7 @@ use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\TestCase;
 
 /**
- * test/fixtures/registry-reads.json is agreely-contracts vectors/registry-reads.json at 1cbdfa8: the exact eth_call
+ * test/fixtures/registry-reads.json is agreely-contracts vectors/registry-reads.json at bf122fb: the exact eth_call
  * answers of AgreelyRegistry, asserted on the contract side by test/RegistryReadVectors.t.sol.
  */
 final class RegistryReadsTest extends TestCase

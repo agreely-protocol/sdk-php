@@ -105,7 +105,7 @@ final class ReceiptVerifier
     // Base mainnet (8453) has no entry until its registry is deployed: the address is added here at
     // that cutover, never guessed. Until then, the on-chain checks on 8453 need an explicit registryAddress.
     private const REGISTRY_BY_CHAIN = [
-        84532 => '0xAf170eA0F66279104D5CF25d7938bBe7A4173e61', // Base Sepolia, deployed at block 50179535
+        84532 => '0xf25D3F8E73648C797Be2CCCD428061f357567b9A', // Base Sepolia, deployed at block 50213158
     ];
     // Base mainnet (chainId 8453) is the default chain. Base Sepolia (84532) is an explicit opt-in for testing.
     private const DEFAULT_CHAIN_ID = 8453;
@@ -764,7 +764,7 @@ final class ReceiptVerifier
 
     /**
      * OPT-IN (rpcUrl): is the document CID anchored? One eth_call `rootOf(keccak256(cid))`: lane 3 (a consent
-     * document, untagged) passes, an empty record fails, a record in another lane fails with its own reason.
+     * document, untagged) passes, an empty record is not yet anchored (unavailable), a record in another lane or tagged fails.
      *
      * @param array<array-key,mixed> $r
      * @param list<string> $notes
@@ -797,9 +797,11 @@ final class ReceiptVerifier
             $notes[] = "documentAnchor UNAVAILABLE: {$reason}. This is NOT a missing anchor.";
             return 'unavailable';
         }
+        // No record is not a contradiction: a document is published first and anchored asynchronously.
         if ($rec['lane'] === 0) {
-            $notes[] = "documentAnchor FAILED: the registry on chainId {$chainId} holds no anchor for CID {$cid}.";
-            return 'fail';
+            $notes[] = "documentAnchor UNAVAILABLE: CID {$cid} is not anchored yet on chainId {$chainId}. "
+                . 'A document is anchored after it is published, so an absent record is not a contradiction.';
+            return 'unavailable';
         }
         if ($rec['lane'] !== self::DOCUMENT_LANE || preg_match('/^0x0{64}$/', $rec['tag']) !== 1) {
             $as = $rec['lane'] === self::DOCUMENT_LANE

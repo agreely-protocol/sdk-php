@@ -214,7 +214,7 @@ final class BundleVerificationTest extends TestCase
         $this->assertSame([], array_filter($calls, static fn (array $c): bool => $c['method'] !== 'eth_call'));
     }
 
-    public function testAnAbsentDocumentRecordFails(): void
+    public function testAnAbsentDocumentRecordIsUnavailableNotFailAndLeavesAVerifiedBundleVerified(): void
     {
         $calls = [];
         $result = self::verify(self::readable('cidv1.bundle'), self::SEPOLIA + [
@@ -223,8 +223,9 @@ final class BundleVerificationTest extends TestCase
                 $calls,
             ),
         ]);
-        $this->assertSame('fail', $result->documentAnchor);
-        $this->assertSame('failed', $result->overall);
+        $this->assertSame('unavailable', $result->documentAnchor);
+        $this->assertStringContainsString('not anchored yet', implode("\n", $result->notes));
+        $this->assertSame('verified', $result->overall);
     }
 
     // --- a bundle naming a registry the SDK does not read is refused, with no RPC ---
@@ -354,7 +355,7 @@ final class BundleVerificationTest extends TestCase
         $result = self::verify($bundle, self::SEPOLIA + [
             'httpPost' => self::rpc(
                 static fn (string $m, array $p): array => ['result', $m !== 'eth_call' ? null
-                    : (self::selectorOf($p) === '0x6d6f398e' ? RegistryAnswers::rootWord(0) : RegistryAnswers::anchorWord($root, 1760000000, 1760000600, 2))],
+                    : (self::selectorOf($p) === '0x6d6f398e' ? RegistryAnswers::rootWord(1) : RegistryAnswers::anchorWord($root, 1760000000, 1760000600, 2))],
                 $calls,
             ),
         ]);

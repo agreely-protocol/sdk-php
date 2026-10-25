@@ -194,7 +194,6 @@ final class ReceiptVerificationTest extends TestCase
     /** @return iterable<string, array{int, string}> */
     public static function otherLanes(): iterable
     {
-        yield 'absent' => [0, 'holds no anchor for CID'];
         yield 'audit family' => [1, 'as an audit-family root, not as a consent document'];
         yield 'cookie' => [2, 'as a cookie consent root, not as a consent document'];
         yield 'unknown lane' => [7, 'as a root of lane 7, not as a consent document'];
@@ -209,6 +208,17 @@ final class ReceiptVerificationTest extends TestCase
         $this->assertSame('fail', $result->documentAnchor);
         $this->assertNull($result->documentAnchorRecord);
         $this->assertStringContainsString($reason, implode("\n", $result->notes));
+    }
+
+    public function testDocumentAnchorIsUnavailableNotFailWhileTheDocumentIsNotAnchoredYet(): void
+    {
+        $sent = [];
+        $result = $this->verifyCitizenReceipt(['chainId' => 84532], RegistryAnswers::rootWord(0), $sent);
+
+        $this->assertSame('unavailable', $result->documentAnchor);
+        $this->assertNull($result->documentAnchorRecord);
+        $this->assertStringContainsString('not anchored yet', implode("\n", $result->notes));
+        $this->assertNotSame('failed', $result->overall);
     }
 
     public function testDocumentAnchorFailsOnATaggedDocumentRecord(): void
