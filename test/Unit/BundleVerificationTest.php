@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Agreely\Sdk\Test\Unit;
 
 use Agreely\Sdk\Agreely;
+use Agreely\Sdk\Test\Support\RegistryAnswers;
 use Agreely\Sdk\Verify\ReceiptVerification;
 use Agreely\Sdk\Verify\ReceiptVerifier;
 use PHPUnit\Framework\Attributes\DataProvider;
@@ -17,8 +18,9 @@ use PHPUnit\Framework\TestCase;
 final class BundleVerificationTest extends TestCase
 {
     private const FORGED = ['f1-purpose', 'f2-granted', 'f3-cell', 'f4-graft-keepsubj', 'f5-graft-subjX', 'f6-doc', 'f7-issuer', 'f11-basis'];
-    private const DEPLOY_BLOCK = 48889369;
-    private const HEAD = self::DEPLOY_BLOCK + 25000;
+    private const SEPOLIA = ['rpcUrl' => 'https://rpc.test', 'chainId' => 84532];
+    // The vectors were issued on the emit-only Base Sepolia registry, named in their signed issuer delegation.
+    private const EMIT_ONLY = ['0x3532a9DfF3C910152543afCa49De7c66113C5312', '0x23577fafFa306375028D33a559D0F95Ced9424DB'];
 
     /** @return array<string,mixed> */
     private static function artefact(string $name): array
@@ -168,117 +170,170 @@ final class BundleVerificationTest extends TestCase
         };
     }
 
-    private static function hexBlock(int $n): string
+    /** @return array<string,mixed> */
+    private static function readable(string $name): array
     {
-        return '0x' . dechex($n);
+        return RegistryAnswers::onReadableRegistry(self::artefact($name));
     }
 
-    public function testAnRpcErrorOrATransportFailureReadsUnavailableNeverFailed(): void
+    /** The selector of an eth_call request's data. */
+    private static function selectorOf(mixed $params): string
     {
-        foreach (['error', 'down'] as $mode) {
+        /** @var list<array{data?:string}> $params */
+        return substr($params[0]['data'] ?? '', 0, 10);
+    }
+
+    // --- the document anchor is one eth_call rootOf(keccak256(cid)) (N6) ----------
+
+    public function testAnRpcErrorATransportFailureOrAShortAnswerReadsUnavailableNeverFailed(): void
+    {
+        $answers = [
+            'error' => static fn (): array => ['error'],
+            'down' => static fn (): array => ['down'],
+            'short' => static fn (): array => ['result', '0x' . str_repeat('00', 96)],
+        ];
+        foreach ($answers as $mode => $answer) {
             $calls = [];
-            $result = self::verify(self::artefact('cidv1.bundle'), [
-                'rpcUrl' => 'https://rpc.test',
-                'httpPost' => self::rpc(static fn (): array => [$mode], $calls),
-            ]);
+            $result = self::verify(self::readable('cidv1.bundle'), self::SEPOLIA + ['httpPost' => self::rpc($answer, $calls)]);
             $this->assertSame('unavailable', $result->documentAnchor, $mode);
             $this->assertNotSame('failed', $result->overall, $mode);
         }
     }
 
-    public function testTheLogQueryStartsAtTheDeployBlock(): void
+    public function testALaneThreeRecordPassesInOneCallWithNoLogQuery(): void
     {
         $calls = [];
-        $result = self::verify(self::artefact('cidv1.bundle'), [
-            'rpcUrl' => 'https://rpc.test',
+        $result = self::verify(self::readable('cidv1.bundle'), self::SEPOLIA + [
             'httpPost' => self::rpc(
-                static fn (string $m): array => $m === 'eth_blockNumber' ? ['result', self::hexBlock(self::HEAD)] : ['result', [['blockNumber' => '0x1']]],
+                static fn (string $m, array $p): array => ['result', self::selectorOf($p) === '0x6d6f398e' ? RegistryAnswers::rootWord(3) : null],
                 $calls,
             ),
         ]);
         $this->assertSame('pass', $result->documentAnchor);
-        $logs = array_values(array_filter($calls, static fn (array $c): bool => $c['method'] === 'eth_getLogs'));
-        /** @var array{fromBlock:string} $filter */
-        $filter = $logs[0]['params'][0];
-        $this->assertSame(self::hexBlock(self::DEPLOY_BLOCK), $filter['fromBlock']);
+        $this->assertSame(['anchoredAt' => 1790816400, 'anchoredBlock' => 53000000], $result->documentAnchorRecord);
+        $this->assertSame([], array_filter($calls, static fn (array $c): bool => $c['method'] !== 'eth_call'));
     }
 
-    /** @return callable(string, list<mixed>): array{0:string, 1?:mixed} */
-    private static function rangeLimited(): callable
-    {
-        return static function (string $m, array $params): array {
-            if ($m === 'eth_blockNumber') {
-                return ['result', self::hexBlock(self::HEAD)];
-            }
-            if ($m === 'eth_call') {
-                return ['result', null];
-            }
-            /** @var array{fromBlock:string, toBlock:string} $f */
-            $f = $params[0];
-            if (hexdec($f['toBlock']) - hexdec($f['fromBlock']) + 1 > 10000) {
-                return ['error', 'range too large'];
-            }
-            return ['result', []];
-        };
-    }
-
-    public function testARefusedFullRangePagesBackwardsAndAnEmptyWholeRangeFails(): void
+    public function testAnAbsentDocumentRecordFails(): void
     {
         $calls = [];
-        $result = self::verify(self::artefact('cidv1.bundle'), [
-            'rpcUrl' => 'https://rpc.test',
-            'httpPost' => self::rpc(self::rangeLimited(), $calls),
+        $result = self::verify(self::readable('cidv1.bundle'), self::SEPOLIA + [
+            'httpPost' => self::rpc(
+                static fn (string $m, array $p): array => ['result', self::selectorOf($p) === '0x6d6f398e' ? RegistryAnswers::rootWord(0) : null],
+                $calls,
+            ),
         ]);
         $this->assertSame('fail', $result->documentAnchor);
-        $this->assertCount(1 + 3, array_filter($calls, static fn (array $c): bool => $c['method'] === 'eth_getLogs'));
+        $this->assertSame('failed', $result->overall);
     }
 
-    public function testARangeLargerThanTheQueryBudgetIsUnavailable(): void
+    // --- a bundle naming a registry the SDK does not read is refused, with no RPC ---
+
+    /** @return iterable<string, array{string}> */
+    public static function emitOnly(): iterable
     {
+        foreach (self::EMIT_ONLY as $address) {
+            yield $address => [$address];
+        }
+    }
+
+    #[DataProvider('emitOnly')]
+    public function testABundleNamingAnEmitOnlyRegistryFailsAsAnUnknownRegistry(string $address): void
+    {
+        $bundle = self::artefact('a1v1.bundle');
+        /** @var array{didDocuments: array{issuer: array{delegation: array{body: array<string,mixed>}}}} $bundle */
+        $bundle['didDocuments']['issuer']['delegation']['body']['registry'] = strtolower($address);
         $calls = [];
-        $result = self::verify(self::artefact('cidv1.bundle'), [
-            'rpcUrl' => 'https://rpc.test',
-            'httpPost' => self::rpc(self::rangeLimited(), $calls),
-            'maxLogQueries' => 2,
-        ]);
-        $this->assertSame('unavailable', $result->documentAnchor);
-        $this->assertNotSame('failed', $result->overall);
+        $result = self::verify($bundle, self::SEPOLIA + ['httpPost' => self::rpc(static fn (): array => ['result', RegistryAnswers::rootWord(3)], $calls)]);
+        $this->assertSame('fail', $result->consentAnchor);
+        $this->assertStringContainsString(
+            'the bundle names the registry ' . strtolower($address) . ' on chainId 84532, which is not a known registry for chainId 84532',
+            implode("\n", $result->notes),
+        );
+        $this->assertSame([], $calls);
+    }
+
+    public function testTheIssuedVectorsKeepTheirSignaturesAndTheirAnchorStepRefusesTheRegistryTheyName(): void
+    {
+        foreach (['a1v1.bundle', 'cidv1.bundle'] as $name) {
+            $calls = [];
+            $result = self::verify(self::artefact($name), self::SEPOLIA + ['httpPost' => self::rpc(static fn (): array => ['result', RegistryAnswers::rootWord(3)], $calls)]);
+            $this->assertSame(['pass', 'pass', 'pass'], [$result->companySignature, $result->receiptIntegrity, $result->citizenAssertion], $name);
+            $this->assertSame('fail', $result->consentAnchor, $name);
+            $this->assertNotSame('pass', $result->documentAnchor, $name);
+            $this->assertSame([], $calls, $name);
+        }
+    }
+
+    public function testABundleNamingTheReadRegistryOnAnotherChainIsRefused(): void
+    {
+        $bundle = self::readable('a1v1.bundle');
+        /** @var array{didDocuments: array{issuer: array{delegation: array{body: array<string,mixed>}}}} $bundle */
+        $bundle['didDocuments']['issuer']['delegation']['body']['chainId'] = '8453';
+        $calls = [];
+        $result = self::verify($bundle, self::SEPOLIA + ['httpPost' => self::rpc(static fn (): array => ['result', RegistryAnswers::rootWord(3)], $calls)]);
+        $this->assertSame('fail', $result->consentAnchor);
+        $this->assertSame([], $calls);
     }
 
     // --- the consent anchor is read with eth_call registry(consentRef) (N6) -------
 
-    private static function anchorWord(string $root, int $anchoredAt, int $revokedAt = 0, int $state = 1): string
+    public function testARecordUnderTheBundleMerkleRootPassesReadWithTheRegistrySelectorItsBlockExposed(): void
     {
-        $w = static fn (int $n): string => str_pad(dechex($n), 64, '0', STR_PAD_LEFT);
-        return '0x' . preg_replace('/^0x/', '', $root) . $w($anchoredAt) . $w($revokedAt) . $w($state);
-    }
-
-    public function testARecordUnderTheBundleMerkleRootPassesReadWithTheRegistrySelector(): void
-    {
-        $bundle = self::artefact('a1v1.bundle');
+        $bundle = self::readable('a1v1.bundle');
         $root = is_string($bundle['merkleRoot'] ?? null) ? $bundle['merkleRoot'] : '';
         $calls = [];
-        $result = self::verify($bundle, [
-            'rpcUrl' => 'https://rpc.test',
-            'httpPost' => self::rpc(static fn (string $m): array => $m === 'eth_call' ? ['result', self::anchorWord($root, 1760000000)] : ['result', null], $calls),
+        $result = self::verify($bundle, self::SEPOLIA + [
+            'httpPost' => self::rpc(static fn (string $m): array => ['result', $m === 'eth_call' ? RegistryAnswers::anchorWord($root, 1760000000) : null], $calls),
         ]);
         $this->assertSame('pass', $result->consentAnchor);
         $this->assertSame('verified', $result->overall);
         $call = array_values(array_filter($calls, static fn (array $c): bool => $c['method'] === 'eth_call'))[0];
         /** @var list<string> $refs */
         $refs = $bundle['consentRefs'];
-        /** @var array{data:string} $tx */
+        /** @var array{data:string, to:string} $tx */
         $tx = $call['params'][0];
         $this->assertSame('0x7ef50298' . substr($refs[0], 2), $tx['data']);
-        $this->assertSame([], array_filter($calls, static fn (array $c): bool => $c['method'] === 'eth_getLogs'));
+        $this->assertSame(RegistryAnswers::SEPOLIA_REGISTRY, $tx['to']);
+        $this->assertCount(count($refs), $result->consentAnchorRecords ?? []);
+        $this->assertSame(
+            ['consentRef' => strtolower($refs[0]), 'state' => 'active', 'anchoredAt' => 1760000000, 'revokedAt' => 0, 'anchoredBlock' => 53000000],
+            ($result->consentAnchorRecords ?? [])[0] ?? null,
+        );
+        $this->assertStringContainsString('anchored in block 53000000', implode("\n", $result->notes));
+    }
+
+    public function testAWithdrawnRecordIsNeverAPass(): void
+    {
+        $bundle = self::readable('a1v1.bundle');
+        $root = is_string($bundle['merkleRoot'] ?? null) ? $bundle['merkleRoot'] : '';
+        $calls = [];
+        $result = self::verify($bundle, self::SEPOLIA + [
+            'httpPost' => self::rpc(static fn (string $m): array => ['result', $m === 'eth_call' ? RegistryAnswers::anchorWord($root, 1760000000, 1760000600, 2) : null], $calls),
+        ]);
+        $this->assertSame('fail', $result->consentAnchor);
+        $first = ($result->consentAnchorRecords ?? [])[0] ?? [];
+        $this->assertSame('withdrawn', $first['state'] ?? null);
+        $this->assertSame(1760000600, $first['revokedAt'] ?? null);
+        $this->assertStringContainsString('WITHDRAWN', implode("\n", $result->notes));
+    }
+
+    public function testAFourWordAnswerIsUnreadableNeverARecord(): void
+    {
+        $bundle = self::readable('a1v1.bundle');
+        $root = is_string($bundle['merkleRoot'] ?? null) ? $bundle['merkleRoot'] : '';
+        $calls = [];
+        $result = self::verify($bundle, self::SEPOLIA + [
+            'httpPost' => self::rpc(static fn (string $m): array => ['result', $m === 'eth_call' ? substr(RegistryAnswers::anchorWord($root, 1760000000), 0, 2 + 256) : null], $calls),
+        ]);
+        $this->assertSame('unavailable', $result->consentAnchor);
     }
 
     public function testARecordUnderAnotherMerkleRootFails(): void
     {
         $calls = [];
-        $result = self::verify(self::artefact('a1v1.bundle'), [
-            'rpcUrl' => 'https://rpc.test',
-            'httpPost' => self::rpc(static fn (string $m): array => $m === 'eth_call' ? ['result', self::anchorWord('0x' . str_repeat('99', 32), 1760000000)] : ['result', null], $calls),
+        $result = self::verify(self::readable('a1v1.bundle'), self::SEPOLIA + [
+            'httpPost' => self::rpc(static fn (string $m): array => ['result', $m === 'eth_call' ? RegistryAnswers::anchorWord('0x' . str_repeat('99', 32), 1760000000) : null], $calls),
         ]);
         $this->assertSame('fail', $result->consentAnchor);
         $this->assertSame('failed', $result->overall);
@@ -288,11 +343,11 @@ final class BundleVerificationTest extends TestCase
     {
         $answers = [
             static fn (): array => ['down'],
-            static fn (string $m): array => $m === 'eth_call' ? ['result', self::anchorWord('0x' . str_repeat('00', 32), 0, 0, 0)] : ['result', null],
+            static fn (string $m): array => ['result', $m === 'eth_call' ? RegistryAnswers::anchorWord('0x' . str_repeat('00', 32), 0, 0, 0) : null],
         ];
         foreach ($answers as $answer) {
             $calls = [];
-            $result = self::verify(self::artefact('a1v1.bundle'), ['rpcUrl' => 'https://rpc.test', 'httpPost' => self::rpc($answer, $calls)]);
+            $result = self::verify(self::readable('a1v1.bundle'), self::SEPOLIA + ['httpPost' => self::rpc($answer, $calls)]);
             $this->assertSame('unavailable', $result->consentAnchor);
             $this->assertNotSame('failed', $result->overall);
         }

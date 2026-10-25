@@ -66,8 +66,10 @@ use Throwable;
  *   - ipfsGateway:         callable(string $cid): string: CID -> URL
  *   - httpGet:             callable(string $url): ?string: fetch body (IPFS, DID), null on any failure
  *   - httpPost:            callable(string $url, string $body): ?string: JSON-RPC, null on any failure
- *   - rpcUrl, registryAddress, chainId: opt-in on-chain documentAnchor and consentAnchor
- *   - registryDeployBlock, logRangeLimit (10000), maxLogQueries (10): bound the log query
+ *   - rpcUrl, registryAddress, chainId: opt-in on-chain documentAnchor and consentAnchor, read by
+ *                          eth_call. registryAddress (any address, read by eth_call) defaults to the
+ *                          known registry of chainId; Base mainnet (8453) has none yet: pass it there,
+ *                          or the anchor checks fail with "no known registry for this chain"
  *   - timeoutMs:           int, default 10000, per HTTP call
  *   - rpcDeadlineMs:       int, default 30000: the whole on-chain sequence of one verification,
  *                          from its first RPC call; past it the pending anchor checks read "unavailable"
@@ -93,34 +95,24 @@ final class ReceiptVerifier
      */
     private const DEFAULT_CITIZEN_BASE = 'https://my.agreely.ca';
     private const DEFAULT_IPFS_GATEWAY = 'https://gateway.lighthouse.storage/ipfs/';
-    // The LIVE Base mainnet AgreelyRegistry, deployed at block 48889369 (the 2026-07-19
-    // redeploy that carries the DID-tagged anchor events). EIP-55 checksummed.
+    // The AgreelyRegistry each chain is read from, by eth_call. EIP-55 checksummed.
     //
-    // KEEP THIS IN SYNC WITH THE DEPLOYMENT. It is pinned BY HAND here (the SDK has no
-    // config to read), and the app resolves its own address from config/anchor-network.json,
-    // so a redeploy does NOT propagate here on its own. A stale address is SILENT and WORSE
-    // than a missing one: the superseded contract still exists on chain and still answers,
-    // it just holds no anchors, so every anchor check would contradict a valid receipt.
-    // The predecessor 0x1E3121CFB5dfE1ac0b0265790D2bdA709725cF8B did exactly that in v0.2.0.
-    // ReceiptVerifierRegistryTest pins this value so a silent edit fails a test.
+    // KEEP THIS IN SYNC WITH THE DEPLOYMENTS. It is pinned BY HAND (the SDK reads no config), so a
+    // redeploy does NOT propagate here on its own. A stale address is SILENT and WORSE than a missing
+    // one: a superseded contract still exists and still answers, it just holds no anchors.
+    // RegistryReadsTest pins this map, and refuses every address that is not on it.
     //
-    // Setting it back to null reports the on-chain checks as "skipped" for mainnet (never a
-    // false result), which is the correct fallback if it is ever unknown.
-    private const MAINNET_REGISTRY_ADDRESS = '0x23577fafFa306375028D33a559D0F95Ced9424DB';
-    private const MAINNET_DEPLOY_BLOCK = 48889369;
-    // Base mainnet (chainId 8453) is the default. Base Sepolia (84532) remains available as an
-    // explicit opt-in for integrators testing against the testnet registry (pass chainId 84532).
-    private const DEFAULT_CHAIN_ID = 8453;
+    // Base mainnet (8453) has no entry until its registry is deployed: the address is added here at
+    // that cutover, never guessed. Until then, the on-chain checks on 8453 need an explicit registryAddress.
     private const REGISTRY_BY_CHAIN = [
-        8453 => self::MAINNET_REGISTRY_ADDRESS,        // Base mainnet (default)
-        84532 => '0x3532a9DfF3C910152543afCa49De7c66113C5312', // Base Sepolia (optional testing)
+        84532 => '0xAf170eA0F66279104D5CF25d7938bBe7A4173e61', // Base Sepolia, deployed at block 50179535
     ];
-    private const DEPLOY_BLOCK_BY_CHAIN = [8453 => self::MAINNET_DEPLOY_BLOCK, 84532 => 43698609];
-    // `registry(bytes32)` answers the deployed `struct Anchor` as four words whose ORDER changed
-    // between deployments: Sepolia still runs the pre-repack layout.
-    private const LEGACY_LAYOUT_CHAINS = [84532];
-    private const DEFAULT_LOG_RANGE_LIMIT = 10000;
-    private const DEFAULT_MAX_LOG_QUERIES = 10;
+    // Base mainnet (chainId 8453) is the default chain. Base Sepolia (84532) is an explicit opt-in for testing.
+    private const DEFAULT_CHAIN_ID = 8453;
+    // rootOf(bytes32) -> (tag, anchoredAt, anchoredBlock, lane). A consent document is keyed keccak256(bytes(cid)),
+    // lane 3, always untagged.
+    private const DOCUMENT_LANE = 3;
+    private const ROOT_LANES = [1 => 'an audit-family root', 2 => 'a cookie consent root'];
     private const DEFAULT_TIMEOUT_MS = 10000;
     private const DEFAULT_RPC_DEADLINE_MS = 30000;
     // A malformed bundle must not spray unbounded RPC calls.
@@ -168,6 +160,16 @@ final class ReceiptVerifier
     private Canonicalizer $canonicalizer;
     /** The deadline (hrtime, ns) of the current verification's RPC sequence, set by its first call. */
     private ?int $rpcDeadline = null;
+    /**
+     * The registry the current bundle names, read only to refuse a mismatch, never to choose what is read.
+     *
+     * @var array{chainId:string, registry:string}|null
+     */
+    private ?array $namedRegistry = null;
+    /** @var array{anchoredAt:int, anchoredBlock:int}|null */
+    private ?array $documentRecord = null;
+    /** @var list<array{consentRef:string, state:string, anchoredAt:int, revokedAt:int, anchoredBlock:int}>|null */
+    private ?array $consentRecords = null;
 
     /** @param array<string,mixed> $opts */
     public function __construct(private readonly array $opts = [])
@@ -213,6 +215,9 @@ final class ReceiptVerifier
     public function verify(mixed $input): ReceiptVerification
     {
         $this->rpcDeadline = null;
+        $this->namedRegistry = null;
+        $this->documentRecord = null;
+        $this->consentRecords = null;
         if (is_string($input)) {
             $decoded = self::decodeJson($input);
             if ($decoded === null) {
@@ -247,6 +252,7 @@ final class ReceiptVerifier
         $r = $bundle !== null ? self::asObject($bundle['receipt'] ?? null) : $input;
         $type = self::receiptType($r);
         $notes = [];
+        $this->namedRegistry = $bundle !== null ? self::namedRegistryOf($bundle) : null;
         if ($bundle !== null) {
             $notes[] = 'Read as a verification bundle. Keys are resolved from the issuer and citizen DIDs (or your resolver), '
                 . "never taken from the bundle's own didDocuments, which anyone can write.";
@@ -309,6 +315,8 @@ final class ReceiptVerifier
             cellLabelBinding: $cellLabelBinding,
             overall: $overall,
             notes: $notes,
+            documentAnchorRecord: $this->documentRecord,
+            consentAnchorRecords: $this->consentRecords,
         );
     }
 
@@ -355,6 +363,8 @@ final class ReceiptVerifier
             cellLabelBinding: 'unsupported',
             overall: $overall,
             notes: $notes,
+            documentAnchorRecord: $this->documentRecord,
+            consentAnchorRecords: $this->consentRecords,
         );
     }
 
@@ -441,6 +451,8 @@ final class ReceiptVerifier
             cellLabelBinding: $cellLabelBinding,
             overall: $overall,
             notes: $notes,
+            documentAnchorRecord: $this->documentRecord,
+            consentAnchorRecords: $this->consentRecords,
         );
     }
 
@@ -747,9 +759,8 @@ final class ReceiptVerifier
     }
 
     /**
-     * OPT-IN (rpcUrl): is the document CID anchored (IdentityAnchored)? The event is emit-only, so this is
-     * a log query from the registry's deploy block, paged under a provider's range limit. "fail" only when
-     * the chain answered for EVERY block of that range; any refusal, error or budget exhaustion is "unavailable".
+     * OPT-IN (rpcUrl): is the document CID anchored? One eth_call `rootOf(keccak256(cid))`: lane 3 (a consent
+     * document, untagged) passes, an empty record fails, a record in another lane fails with its own reason.
      *
      * @param array<array-key,mixed> $r
      * @param list<string> $notes
@@ -768,72 +779,42 @@ final class ReceiptVerifier
             return 'skipped';
         }
         $chainId = $this->chainId();
-        $registry = $this->registry();
-        if ($registry === null) {
-            $notes[] = "documentAnchor skipped: no AgreelyRegistry address is known for chainId {$chainId}.";
-            return 'skipped';
+        $target = $this->registryToRead();
+        if (!$target['ok']) {
+            $notes[] = "documentAnchor FAILED: {$target['reason']}";
+            return 'fail';
         }
 
-        $head = $this->rpc($rpcUrl, 'eth_blockNumber', []);
-        $latest = $head['ok'] ? self::parseQuantity($head['result']) : null;
-        if (!$head['ok'] || $latest === null) {
-            $reason = $head['ok'] ? 'the RPC answered an unreadable block number' : $head['reason'];
+        $selector = substr(Keccak::hashHex('rootOf(bytes32)'), 0, 10);
+        $call = $this->rpc($rpcUrl, 'eth_call', [['to' => $target['address'], 'data' => $selector . self::stripHex(Keccak::hashHex($cid))], 'latest']);
+        $rec = $call['ok'] ? self::decodeRootRecord($call['result']) : null;
+        if ($rec === null) {
+            $reason = $call['ok'] ? 'the registry answered rootOf with an unreadable record' : $call['reason'];
             $notes[] = "documentAnchor UNAVAILABLE: {$reason}. This is NOT a missing anchor.";
             return 'unavailable';
         }
-        $deployBlock = $this->intOpt('registryDeployBlock') ?? self::DEPLOY_BLOCK_BY_CHAIN[$chainId] ?? 0;
-        $from = min($deployBlock, $latest);
-        $topics = [Keccak::hashHex('IdentityAnchored(bytes32,uint64)'), Keccak::hashHex($cid)];
-        $found = "Document anchor FOUND on chainId {$chainId}: CID {$cid} existed at anchor time. "
-            . 'This proves the DOCUMENT existed, NOT that any consent was given.';
-        $absent = "documentAnchor FAILED: the chain answered for every block from {$from} to {$latest} "
-            . "and holds no anchor for CID {$cid} on chainId {$chainId}.";
-
-        // One full-range query first: a provider without a range limit answers it outright.
-        $full = $this->getLogs($rpcUrl, $registry, $from, $latest, $topics);
-        if ($full['ok']) {
-            if (!is_array($full['result']) || !array_is_list($full['result'])) {
-                $notes[] = 'documentAnchor UNAVAILABLE: the RPC answered the log query with something other than a list. This is NOT a missing anchor.';
-                return 'unavailable';
-            }
-            $notes[] = count($full['result']) > 0 ? $found : $absent;
-            return count($full['result']) > 0 ? 'pass' : 'fail';
-        }
-
-        // Refused (range limit, archive token): page backwards from the head, newest first.
-        $range = self::positiveInt($this->opts['logRangeLimit'] ?? null, self::DEFAULT_LOG_RANGE_LIMIT);
-        $budget = self::positiveInt($this->opts['maxLogQueries'] ?? null, self::DEFAULT_MAX_LOG_QUERIES);
-        $hi = $latest;
-        for ($q = 0; $q < $budget && $hi >= $from; $q++) {
-            $lo = max($from, $hi - $range + 1);
-            $page = $this->getLogs($rpcUrl, $registry, $lo, $hi, $topics);
-            if (!$page['ok'] || !is_array($page['result']) || !array_is_list($page['result'])) {
-                $pageReason = $page['ok'] ? 'an answer that is not a list' : $page['reason'];
-                $notes[] = "documentAnchor UNAVAILABLE: the RPC refused the full-range log query ({$full['reason']}) and a paged query "
-                    . "({$pageReason}). This is NOT a missing anchor.";
-                return 'unavailable';
-            }
-            if (count($page['result']) > 0) {
-                $notes[] = $found;
-                return 'pass';
-            }
-            $hi = $lo - 1;
-        }
-        if ($hi < $from) {
-            $notes[] = $absent;
+        if ($rec['lane'] === 0) {
+            $notes[] = "documentAnchor FAILED: the registry on chainId {$chainId} holds no anchor for CID {$cid}.";
             return 'fail';
         }
-        $next = $hi + 1;
-        $notes[] = "documentAnchor UNAVAILABLE: no anchor for CID {$cid} in blocks {$next} to {$latest}, the "
-            . "{$budget} paged queries this RPC allows ({$full['reason']}); blocks {$from} to {$hi} were "
-            . 'not read. This is NOT a missing anchor: use an RPC that serves the full range, or raise maxLogQueries.';
-        return 'unavailable';
+        if ($rec['lane'] !== self::DOCUMENT_LANE || preg_match('/^0x0{64}$/', $rec['tag']) !== 1) {
+            $as = $rec['lane'] === self::DOCUMENT_LANE
+                ? 'a tagged document, which a consent document never is'
+                : self::ROOT_LANES[$rec['lane']] ?? "a root of lane {$rec['lane']}";
+            $notes[] = "documentAnchor FAILED: keccak256 of CID {$cid} is anchored on chainId {$chainId} as {$as}, not as a "
+                . 'consent document.';
+            return 'fail';
+        }
+        $this->documentRecord = ['anchoredAt' => $rec['anchoredAt'], 'anchoredBlock' => $rec['anchoredBlock']];
+        $notes[] = "Document anchor FOUND on chainId {$chainId}: CID {$cid} was anchored at {$rec['anchoredAt']} in block "
+            . "{$rec['anchoredBlock']}. This proves the DOCUMENT existed, NOT that any consent was given.";
+        return 'pass';
     }
 
     /**
-     * OPT-IN (rpcUrl), BUNDLE ONLY: eth_call registry(consentRef) for each cell's consentRef, as the app's
-     * chain.js reads it. The record is tied to this receipt only through the Merkle root, which is trusted
-     * only once the passkey assertion is bound to it.
+     * OPT-IN (rpcUrl), BUNDLE ONLY: eth_call registry(consentRef) for each cell's consentRef. The record is tied to
+     * this receipt only through the Merkle root, which is trusted only once the passkey assertion is bound to it.
+     * A withdrawn cell (state 2) is never a pass: the consent is no longer in force, however authentic.
      *
      * @param array<array-key,mixed> $bundle
      * @param list<string> $notes
@@ -856,23 +837,23 @@ final class ReceiptVerifier
             return 'skipped';
         }
         $chainId = $this->chainId();
-        $registry = $this->registry();
-        if ($registry === null) {
-            $notes[] = "consentAnchor skipped: no AgreelyRegistry address is known for chainId {$chainId}.";
-            return 'skipped';
+        $target = $this->registryToRead();
+        if (!$target['ok']) {
+            $notes[] = "consentAnchor FAILED: {$target['reason']}";
+            return 'fail';
         }
 
         $root = strtolower(self::stripHex($merkleRoot));
-        $legacy = in_array($chainId, self::LEGACY_LAYOUT_CHAINS, true);
         $selector = substr(Keccak::hashHex('registry(bytes32)'), 0, 10);
+        $records = [];
         $active = 0;
         $withdrawn = 0;
         $pending = 0;
         $unread = 0;
         $foreign = [];
         foreach ($refs as $ref) {
-            $call = $this->rpc($rpcUrl, 'eth_call', [['to' => $registry, 'data' => $selector . self::stripHex($ref)], 'latest']);
-            $rec = $call['ok'] ? self::decodeAnchorRecord($call['result'], $legacy) : null;
+            $call = $this->rpc($rpcUrl, 'eth_call', [['to' => $target['address'], 'data' => $selector . self::stripHex($ref)], 'latest']);
+            $rec = $call['ok'] ? self::decodeAnchorRecord($call['result']) : null;
             $revoked = $rec !== null && ($rec['state'] === 2 || $rec['revokedAt'] > 0);
             // An anchoredAt with neither state Active nor Revoked is a garbage record, not a pending anchor.
             if ($rec === null || ($rec['anchoredAt'] > 0 && !$revoked && $rec['state'] !== 1)) {
@@ -881,11 +862,19 @@ final class ReceiptVerifier
                 $pending++;
             } elseif (strtolower(self::stripHex($rec['merkleRoot'])) !== $root) {
                 $foreign[] = $ref;
-            } elseif ($revoked) {
-                $withdrawn++;
             } else {
-                $active++;
+                $revoked ? $withdrawn++ : $active++;
+                $records[] = [
+                    'consentRef' => $ref,
+                    'state' => $revoked ? 'withdrawn' : 'active',
+                    'anchoredAt' => $rec['anchoredAt'],
+                    'revokedAt' => $rec['revokedAt'],
+                    'anchoredBlock' => $rec['anchoredBlock'],
+                ];
             }
+        }
+        if ($records !== []) {
+            $this->consentRecords = $records;
         }
 
         if ($foreign !== []) {
@@ -895,13 +884,19 @@ final class ReceiptVerifier
         }
         $total = count($refs);
         $counts = "{$total} cell(s): {$active} active, {$withdrawn} withdrawn, {$pending} not anchored yet, {$unread} unreadable";
-        if ($active + $withdrawn !== $total) {
+        $blocks = implode(', ', array_values(array_unique(array_column($records, 'anchoredBlock'))));
+        if ($withdrawn > 0) {
+            $notes[] = "consentAnchor FAILED: WITHDRAWN on chainId {$chainId} ({$counts}). The chain records the consent under "
+                . "this bundle's Merkle root, anchored in block {$blocks}, and records its withdrawal: it is no longer in force.";
+            return 'fail';
+        }
+        if ($active !== $total) {
             $notes[] = "consentAnchor UNAVAILABLE on chainId {$chainId} ({$counts}). Anchoring is asynchronous and an RPC can "
                 . 'fail: this is NOT a contradiction.';
             return 'unavailable';
         }
-        $notes[] = "Consent anchor FOUND on chainId {$chainId} under this bundle's Merkle root ({$counts}). A withdrawn "
-            . 'cell is still authentic: check it before relying on the consent as current.';
+        $notes[] = "Consent anchor FOUND on chainId {$chainId} under this bundle's Merkle root ({$counts}), anchored in "
+            . "block {$blocks}.";
         return 'pass';
     }
 
@@ -921,33 +916,39 @@ final class ReceiptVerifier
         return $this->intOpt('chainId') ?? self::DEFAULT_CHAIN_ID;
     }
 
-    private function registry(): ?string
+    /**
+     * The registry the anchor checks read: the explicit registryAddress, else the chain's known one. A bundle that
+     * names another registry or chain is refused, with no RPC: what it names can narrow the read, never redirect it.
+     *
+     * @return array{ok:true, address:string}|array{ok:false, reason:string}
+     */
+    private function registryToRead(): array
     {
-        $address = $this->opts['registryAddress'] ?? null;
-        if (is_string($address)) {
-            return $address;
+        $chainId = $this->chainId();
+        $explicit = $this->opts['registryAddress'] ?? null;
+        $address = is_string($explicit) && $explicit !== '' ? $explicit : (self::REGISTRY_BY_CHAIN[$chainId] ?? null);
+        if ($address === null) {
+            return ['ok' => false, 'reason' => "no known registry for this chain (chainId {$chainId}): pass its registryAddress."];
         }
-        return self::REGISTRY_BY_CHAIN[$this->chainId()] ?? null;
+        $named = $this->namedRegistry;
+        if (
+            $named !== null
+            && (strtolower($named['registry']) !== strtolower($address) || ($named['chainId'] !== '' && $named['chainId'] !== (string) $chainId))
+        ) {
+            $on = $named['chainId'] !== '' ? " on chainId {$named['chainId']}" : '';
+            return [
+                'ok' => false,
+                'reason' => "the bundle names the registry {$named['registry']}{$on}, which is not a known registry for chainId {$chainId}. "
+                    . 'Nothing was read on chain.',
+            ];
+        }
+        return ['ok' => true, 'address' => $address];
     }
 
     private function intOpt(string $name): ?int
     {
         $v = $this->opts[$name] ?? null;
         return is_int($v) ? $v : null;
-    }
-
-    /**
-     * @param list<string> $topics
-     * @return array{ok:true, result:mixed}|array{ok:false, reason:string}
-     */
-    private function getLogs(string $rpcUrl, string $registry, int $from, int $to, array $topics): array
-    {
-        return $this->rpc($rpcUrl, 'eth_getLogs', [[
-            'address' => $registry,
-            'fromBlock' => self::toQuantity($from),
-            'toBlock' => self::toQuantity($to),
-            'topics' => $topics,
-        ]]);
     }
 
     /**
@@ -1607,35 +1608,82 @@ final class ReceiptVerifier
     }
 
     /**
-     * Decode `struct Anchor` from registry(bytes32). PACKED (mainnet): merkleRoot, anchoredAt, revokedAt,
-     * state. LEGACY (Sepolia): state, merkleRoot, anchoredAt, revokedAt. Null on anything that is not that
-     * struct in that layout, so a wrong layout reads as unreadable, never as a contradiction.
+     * Decode registry(bytes32): merkleRoot, anchoredAt, revokedAt, state, anchoredBlock. A prefix read: trailing data
+     * is ignored, a shorter answer or a word out of its type's range is null, so it reads as unreadable, never as a
+     * contradiction.
      *
-     * @return array{state:int, merkleRoot:string, anchoredAt:int, revokedAt:int}|null
+     * @return array{merkleRoot:string, anchoredAt:int, revokedAt:int, state:int, anchoredBlock:int}|null
      */
-    private static function decodeAnchorRecord(mixed $result, bool $legacy): ?array
+    private static function decodeAnchorRecord(mixed $result): ?array
+    {
+        $h = strtolower(self::stripHex(self::asString($result)));
+        if (preg_match('/^[0-9a-f]{320}/', $h) !== 1) {
+            return null;
+        }
+        $word = static fn (int $i): string => substr($h, $i * 64, 64);
+        $anchoredAt = self::uint64Word($word(1));
+        $revokedAt = self::uint64Word($word(2));
+        $anchoredBlock = self::uint64Word($word(4));
+        if (preg_match('/^0{62}[0-9a-f]{2}$/', $word(3)) !== 1 || $anchoredAt === null || $revokedAt === null || $anchoredBlock === null) {
+            return null;
+        }
+        return [
+            'merkleRoot' => '0x' . $word(0),
+            'anchoredAt' => $anchoredAt,
+            'revokedAt' => $revokedAt,
+            'state' => (int) hexdec(substr($word(3), 62)),
+            'anchoredBlock' => $anchoredBlock,
+        ];
+    }
+
+    /**
+     * Decode rootOf(bytes32): tag, anchoredAt, anchoredBlock, lane. Null on anything else, and on a record that
+     * contradicts itself (a lane without an anchor time, or an anchor time without a lane).
+     *
+     * @return array{tag:string, anchoredAt:int, anchoredBlock:int, lane:int}|null
+     */
+    private static function decodeRootRecord(mixed $result): ?array
     {
         $h = strtolower(self::stripHex(self::asString($result)));
         if (preg_match('/^[0-9a-f]{256}/', $h) !== 1) {
             return null;
         }
         $word = static fn (int $i): string => substr($h, $i * 64, 64);
-        [$rootW, $anchoredW, $revokedW, $stateW] = $legacy
-            ? [$word(1), $word(2), $word(3), $word(0)]
-            : [$word(0), $word(1), $word(2), $word(3)];
-        if (
-            preg_match('/^0{62}[0-9a-f]{2}$/', $stateW) !== 1
-            || preg_match('/^0{48}[0-9a-f]{16}$/', $anchoredW) !== 1
-            || preg_match('/^0{48}[0-9a-f]{16}$/', $revokedW) !== 1
-        ) {
+        $anchoredAt = self::uint64Word($word(1));
+        $anchoredBlock = self::uint64Word($word(2));
+        if ($anchoredAt === null || $anchoredBlock === null || preg_match('/^0{62}[0-9a-f]{2}$/', $word(3)) !== 1) {
             return null;
         }
-        $anchoredAt = self::safeHexInt(substr($anchoredW, 48));
-        $revokedAt = self::safeHexInt(substr($revokedW, 48));
-        if ($anchoredAt === null || $revokedAt === null) {
+        $lane = (int) hexdec(substr($word(3), 62));
+        if (($lane === 0) !== ($anchoredAt === 0)) {
             return null;
         }
-        return ['state' => (int) hexdec(substr($stateW, 62)), 'merkleRoot' => '0x' . $rootW, 'anchoredAt' => $anchoredAt, 'revokedAt' => $revokedAt];
+        return ['tag' => '0x' . $word(0), 'anchoredAt' => $anchoredAt, 'anchoredBlock' => $anchoredBlock, 'lane' => $lane];
+    }
+
+    /** A uint64 ABI word as a safe integer, null when it is not one. */
+    private static function uint64Word(string $w): ?int
+    {
+        return preg_match('/^0{48}[0-9a-f]{16}$/', $w) === 1 ? self::safeHexInt(substr($w, 48)) : null;
+    }
+
+    /**
+     * The registry a bundle names: its issuer's key delegation is bound to one chain and one registry. Null when
+     * the bundle names none. The delegation is not verified here, so this is only ever used to refuse a read.
+     *
+     * @param array<array-key,mixed> $bundle
+     * @return array{chainId:string, registry:string}|null
+     */
+    private static function namedRegistryOf(array $bundle): ?array
+    {
+        $issuer = self::asObject(self::asObject($bundle['didDocuments'] ?? null)['issuer'] ?? null);
+        $body = self::asObject(self::asObject($issuer['delegation'] ?? null)['body'] ?? null);
+        $registry = self::asString($body['registry'] ?? null);
+        if ($registry === '') {
+            return null;
+        }
+        $chainId = $body['chainId'] ?? null;
+        return ['registry' => $registry, 'chainId' => is_string($chainId) || is_int($chainId) ? (string) $chainId : ''];
     }
 
     /**
@@ -1763,14 +1811,6 @@ final class ReceiptVerifier
         return is_array($v) ? array_map(self::exactJson(...), $v) : $v;
     }
 
-    private static function parseQuantity(mixed $v): ?int
-    {
-        if (!is_string($v) || preg_match('/^0x[0-9a-fA-F]+$/', $v) !== 1) {
-            return null;
-        }
-        return self::safeHexInt(substr($v, 2));
-    }
-
     private static function safeHexInt(string $hex): ?int
     {
         $digits = ltrim(strtolower($hex), '0');
@@ -1782,11 +1822,6 @@ final class ReceiptVerifier
         }
         $n = (int) hexdec($digits);
         return $n <= self::MAX_SAFE_INTEGER ? $n : null;
-    }
-
-    private static function toQuantity(int $n): string
-    {
-        return '0x' . dechex($n);
     }
 
     private static function positiveInt(mixed $v, int $fallback): int

@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Agreely\Sdk\Test\Unit;
 
 use Agreely\Sdk\Agreely;
+use Agreely\Sdk\Test\Support\RegistryAnswers;
 use Agreely\Sdk\Crypto\Canonicalizer;
 use Agreely\Sdk\Types\Wire;
 use Agreely\Sdk\Verify\ReceiptVerification;
@@ -336,15 +337,15 @@ final class CitizenKeyTest extends TestCase
 
     public function testAPartialConsentAnchorReadIsUnavailableNeverPass(): void
     {
-        $bundle = self::vector('receipts/a1v1.bundle.json');
+        $bundle = RegistryAnswers::onReadableRegistry(self::vector('receipts/a1v1.bundle.json'));
         $docs = self::vector('receipts/did-documents.json');
         $root = substr(Wire::str($bundle['merkleRoot']), 2);
-        $word = static fn (int $n): string => str_pad(dechex($n), 64, '0', STR_PAD_LEFT);
         $calls = 0;
         $result = Agreely::verifyReceipt($bundle, [
             'resolver' => static fn (string $did): ?array => is_array($docs[$did] ?? null) ? $docs[$did] : null,
             'rpcUrl' => 'https://rpc.test',
-            'httpPost' => static function (string $url, string $body) use (&$calls, $root, $word): ?string {
+            'chainId' => 84532,
+            'httpPost' => static function (string $url, string $body) use (&$calls, $root): ?string {
                 /** @var array{method:string} $req */
                 $req = json_decode($body, true);
                 if ($req['method'] !== 'eth_call') {
@@ -354,7 +355,7 @@ final class CitizenKeyTest extends TestCase
                 if ($calls > 1) {
                     return null;
                 }
-                $record = '0x' . $root . $word(1760000000) . $word(0) . $word(1);
+                $record = RegistryAnswers::anchorWord($root, 1760000000);
                 return (string) json_encode(['jsonrpc' => '2.0', 'id' => 1, 'result' => $record]);
             },
         ]);
@@ -373,15 +374,15 @@ final class CitizenKeyTest extends TestCase
     #[DataProvider('anchorReads')]
     public function testTheConsentAnchorPassesOnlyOnceEveryCellIsRecordedUnderTheRoot(int $anchored, string $status, string $counts): void
     {
-        $bundle = self::vector('receipts/a1v1.bundle.json');
+        $bundle = RegistryAnswers::onReadableRegistry(self::vector('receipts/a1v1.bundle.json'));
         $docs = self::vector('receipts/did-documents.json');
         $root = substr(Wire::str($bundle['merkleRoot']), 2);
-        $word = static fn (int $n): string => str_pad(dechex($n), 64, '0', STR_PAD_LEFT);
         $calls = 0;
         $result = Agreely::verifyReceipt($bundle, [
             'resolver' => static fn (string $did): ?array => is_array($docs[$did] ?? null) ? $docs[$did] : null,
             'rpcUrl' => 'https://rpc.test',
-            'httpPost' => static function (string $url, string $body) use (&$calls, $anchored, $root, $word): string {
+            'chainId' => 84532,
+            'httpPost' => static function (string $url, string $body) use (&$calls, $anchored, $root): string {
                 /** @var array{method:string} $req */
                 $req = json_decode($body, true);
                 if ($req['method'] !== 'eth_call') {
@@ -389,8 +390,8 @@ final class CitizenKeyTest extends TestCase
                 }
                 $calls++;
                 $record = $calls <= $anchored
-                    ? '0x' . $root . $word(1760000000) . $word(0) . $word(1)
-                    : '0x' . str_repeat('0', 64) . $word(0) . $word(0) . $word(0);
+                    ? RegistryAnswers::anchorWord($root, 1760000000)
+                    : RegistryAnswers::anchorWord('0x' . str_repeat('0', 64), 0, 0, 0);
                 return (string) json_encode(['jsonrpc' => '2.0', 'id' => 1, 'result' => $record]);
             },
         ]);

@@ -259,26 +259,4 @@ final class HostileInputTest extends TestCase
         $this->assertStringNotContainsString('every field of the receipt matches', $notes);
         $this->assertStringContainsString('The receipt id is not covered by the offer.', $notes);
     }
-
-    // --- R11: Base Sepolia's deploy block ----------------------------------------------
-
-    public function testTheSepoliaLogQueryStartsAtTheDeployBlock(): void
-    {
-        $sent = [];
-        self::verify(self::artefact('cidv1.bundle'), [
-            'rpcUrl' => 'https://rpc.test',
-            'chainId' => 84532,
-            'httpPost' => static function (string $url, string $body) use (&$sent): string {
-                /** @var array{method:string, params:list<mixed>} $req */
-                $req = json_decode($body, true);
-                $sent[] = $req;
-                $result = $req['method'] === 'eth_blockNumber' ? '0x' . dechex(43698609 + 5000) : [['blockNumber' => '0x1']];
-                return (string) json_encode(['jsonrpc' => '2.0', 'id' => 1, 'result' => $result]);
-            },
-        ]);
-        $logs = array_values(array_filter($sent, static fn (array $r): bool => $r['method'] === 'eth_getLogs'));
-        /** @var array{fromBlock:string} $filter */
-        $filter = $logs[0]['params'][0];
-        $this->assertSame('0x' . dechex(43698609), $filter['fromBlock']);
-    }
 }

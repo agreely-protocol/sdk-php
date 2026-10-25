@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Agreely\Sdk\Test\Unit;
 
 use Agreely\Sdk\Agreely;
+use Agreely\Sdk\Test\Support\RegistryAnswers;
 use Agreely\Sdk\Verify\ReceiptVerification;
 use PHPUnit\Framework\TestCase;
 
@@ -36,9 +37,7 @@ $method = is_array($req) ? ($req["method"] ?? "") : "";
 $word = fn (int $n): string => str_pad(dechex($n), 64, "0", STR_PAD_LEFT);
 $root = substr($path, 1);
 $result = match ($method) {
-    "eth_call" => "0x" . $root . $word(1760000000) . $word(0) . $word(1),
-    "eth_blockNumber" => "0x" . dechex(48889369 + 100),
-    "eth_getLogs" => [],
+    "eth_call" => "0x" . $root . $word(1760000000) . $word(0) . $word(1) . $word(50179548),
     default => null,
 };
 header("Content-Type: application/json");
@@ -91,9 +90,10 @@ echo $method === "" ? "{\"jsonrpc\":\"2.0\",\"id\":1,\"error\":{\"code\":-32600,
         $docs = json_decode((string) file_get_contents(dirname(__DIR__, 2) . '/vectors/receipts/did-documents.json'), true);
         /** @var array<string,mixed> $bundle */
         $bundle = json_decode((string) file_get_contents(dirname(__DIR__, 2) . '/vectors/receipts/a1v1.bundle.json'), true);
-        return Agreely::verifyReceipt($bundle, [
+        return Agreely::verifyReceipt(RegistryAnswers::onReadableRegistry($bundle), [
             'resolver' => static fn (string $did): ?array => is_array($docs[$did] ?? null) ? $docs[$did] : null,
             'rpcUrl' => "http://127.0.0.1:{$this->port}/{$path}",
+            'chainId' => 84532,
         ] + $opts);
     }
 
@@ -124,6 +124,7 @@ echo $method === "" ? "{\"jsonrpc\":\"2.0\",\"id\":1,\"error\":{\"code\":-32600,
         $result = $this->verify(substr($bundle['merkleRoot'], 2));
         $this->assertSame('pass', $result->consentAnchor);
         $this->assertSame('verified', $result->overall);
+        $this->assertSame(50179548, $result->consentAnchorRecords[0]['anchoredBlock'] ?? null);
     }
 
     public function testAHangingRpcCannotHoldAVerificationPastTheDeadline(): void

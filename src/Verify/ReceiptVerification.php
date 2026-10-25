@@ -21,7 +21,14 @@ namespace Agreely\Sdk\Verify;
  */
 final class ReceiptVerification
 {
-    /** @param list<string> $notes */
+    /**
+     * @param list<string> $notes
+     * @param array{anchoredAt:int, anchoredBlock:int}|null $documentAnchorRecord present when documentAnchor
+     *        passed: when, and in which block, the document CID was anchored (unix seconds)
+     * @param list<array{consentRef:string, state:string, anchoredAt:int, revokedAt:int, anchoredBlock:int}>|null $consentAnchorRecords
+     *        present when consentAnchor read a cell under the bundle's Merkle root: one record per such cell,
+     *        state 'active' | 'withdrawn', revokedAt 0 while in force
+     */
     public function __construct(
         public readonly string $input,
         public readonly string $receiptType,
@@ -34,6 +41,8 @@ final class ReceiptVerification
         public readonly string $cellLabelBinding,
         public readonly string $overall,
         public readonly array $notes,
+        public readonly ?array $documentAnchorRecord = null,
+        public readonly ?array $consentAnchorRecords = null,
     ) {
     }
 
@@ -41,11 +50,13 @@ final class ReceiptVerification
      * The array form, in the SAME field shape as the TS ReceiptVerification, so
      * BOTH SDKs canonicalize to byte-identical JCS (the golden-vector discipline).
      *
-     * @return array{input:string,receiptType:string,companySignature:string,receiptIntegrity:string,citizenAssertion:string,disclosureCopy:string,documentAnchor:string,consentAnchor:string,cellLabelBinding:string,overall:string,notes:list<string>}
+     * The anchor records appear only when they were read, as in TS.
+     *
+     * @return array{input:string,receiptType:string,companySignature:string,receiptIntegrity:string,citizenAssertion:string,disclosureCopy:string,documentAnchor:string,consentAnchor:string,cellLabelBinding:string,overall:string,documentAnchorRecord?:array{anchoredAt:int, anchoredBlock:int},consentAnchorRecords?:list<array{consentRef:string, state:string, anchoredAt:int, revokedAt:int, anchoredBlock:int}>,notes:list<string>}
      */
     public function toArray(): array
     {
-        return [
+        $out = [
             'input' => $this->input,
             'receiptType' => $this->receiptType,
             'companySignature' => $this->companySignature,
@@ -56,7 +67,14 @@ final class ReceiptVerification
             'consentAnchor' => $this->consentAnchor,
             'cellLabelBinding' => $this->cellLabelBinding,
             'overall' => $this->overall,
-            'notes' => $this->notes,
         ];
+        if ($this->documentAnchorRecord !== null) {
+            $out['documentAnchorRecord'] = $this->documentAnchorRecord;
+        }
+        if ($this->consentAnchorRecords !== null) {
+            $out['consentAnchorRecords'] = $this->consentAnchorRecords;
+        }
+        $out['notes'] = $this->notes;
+        return $out;
     }
 }
