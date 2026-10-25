@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Agreely\Sdk\Verify;
 
 use Agreely\Sdk\Crypto\Canonicalizer;
+use Agreely\Sdk\Crypto\CanonicalizationException;
 use Agreely\Sdk\Crypto\Cose;
 use Agreely\Sdk\Crypto\Keccak;
 use Agreely\Sdk\Crypto\Multibase;
@@ -209,7 +210,13 @@ final class ReceiptVerifier
 
         $body = $r;
         unset($body['proof']);
-        $canonical = $this->canonicalizer->encode($body);
+        try {
+            $canonical = $this->canonicalizer->encode($body);
+        } catch (CanonicalizationException $e) {
+            // The receipt is untrusted input: a value the canonicalizer refuses (a number) is a verdict, never a throw.
+            $notes[] = "Company signature check FAILED: the receipt body cannot be canonicalized ({$e->getMessage()}), so its signature cannot be checked.";
+            return 'fail';
+        }
 
         try {
             $signature = Multibase::decodeBytes($proofValue);
@@ -356,13 +363,25 @@ final class ReceiptVerifier
                 $notes[] = 'disclosureCopy FAILED (disclosureVersion 2): the receipt declares a v2 disclosureHash but carries no legalBasis map, so the preimage cannot be rebuilt.';
                 return 'fail';
             }
-            $bodyObject = self::asObject($body);
-            if (array_key_exists('legalBasis', $bodyObject)
-                && $this->canonicalizer->encode($bodyObject['legalBasis']) !== $this->canonicalizer->encode($receiptBasis)) {
-                $notes[] = "disclosureCopy FAILED (disclosureVersion 2): the IPFS document body carries a legalBasis that differs from the receipt's.";
+            // The canonicalizer refuses a number. The receipt and the IPFS body are untrusted input: a refusal is a verdict.
+            try {
+                $this->canonicalizer->encode($receiptBasis);
+            } catch (CanonicalizationException $e) {
+                $notes[] = "disclosureCopy FAILED (disclosureVersion 2): the receipt's legalBasis cannot be canonicalized ({$e->getMessage()}), so its preimage cannot be rebuilt.";
                 return 'fail';
             }
-            $computedV2 = $this->disclosureHashOf(['disclosure' => $disclosure, 'legalBasis' => $receiptBasis]);
+            try {
+                $bodyObject = self::asObject($body);
+                if (array_key_exists('legalBasis', $bodyObject)
+                    && $this->canonicalizer->encode($bodyObject['legalBasis']) !== $this->canonicalizer->encode($receiptBasis)) {
+                    $notes[] = "disclosureCopy FAILED (disclosureVersion 2): the IPFS document body carries a legalBasis that differs from the receipt's.";
+                    return 'fail';
+                }
+                $computedV2 = $this->disclosureHashOf(['disclosure' => $disclosure, 'legalBasis' => $receiptBasis]);
+            } catch (CanonicalizationException $e) {
+                $notes[] = "disclosureCopy FAILED: the IPFS document body cannot be canonicalized ({$e->getMessage()}), so its disclosure copy cannot be checked.";
+                return 'fail';
+            }
             if ($computedV2 === $disclosureHash) {
                 $notes[] = "Disclosure copy verified (disclosureVersion 2: {disclosure, legalBasis}): the IPFS document body and the receipt legalBasis match the receipt disclosureHash {$disclosureHash}.";
                 return 'pass';
@@ -372,7 +391,12 @@ final class ReceiptVerifier
         }
 
         // v1 (or absent): the preimage is the disclosure map alone.
-        $computed = $this->disclosureHashOf($disclosure);
+        try {
+            $computed = $this->disclosureHashOf($disclosure);
+        } catch (CanonicalizationException $e) {
+            $notes[] = "disclosureCopy FAILED: the IPFS document body cannot be canonicalized ({$e->getMessage()}), so its disclosure copy cannot be checked.";
+            return 'fail';
+        }
         if ($computed === $disclosureHash) {
             $notes[] = "Disclosure copy verified: the IPFS document body matches the receipt disclosureHash {$disclosureHash}.";
             return 'pass';

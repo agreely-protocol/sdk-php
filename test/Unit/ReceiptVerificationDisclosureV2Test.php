@@ -280,4 +280,53 @@ final class ReceiptVerificationDisclosureV2Test extends TestCase
 
         $this->assertSame('pass', self::disclosureCopyOf($receipt)->disclosureCopy);
     }
+
+    // A number is the one value the JCS canonicalizer refuses here (numbers travel as strings).
+    public function testAV2ReceiptWhoseLegalBasisHoldsANumberFailsWithTheReasonAndDoesNotThrow(): void
+    {
+        $basis = self::LEGAL_BASIS;
+        $basis['0x01']['weight'] = 3;
+        $receipt = self::receiptWith(static function (array $consent) use ($basis): array {
+            $consent['legalBasis'] = $basis;
+            return $consent;
+        });
+        $result = self::disclosureCopyOf($receipt);
+
+        $this->assertSame('fail', $result->disclosureCopy);
+        $this->assertStringContainsString("the receipt's legalBasis cannot be canonicalized", self::notesOf($result));
+    }
+
+    public function testAV2IpfsBodyCarryingALegalBasisWithANumberFailsAndDoesNotThrow(): void
+    {
+        $body = self::IPFS_BODY + ['legalBasis' => ['0x01' => ['basis' => 'consent', 'weight' => 3]]];
+        $result = self::disclosureCopyOf(self::baseReceipt(), $body);
+
+        $this->assertSame('fail', $result->disclosureCopy);
+        $this->assertStringContainsString('the IPFS document body cannot be canonicalized', self::notesOf($result));
+    }
+
+    public function testAV2IpfsBodyWhoseDisclosureHoldsANumberFailsAndDoesNotThrow(): void
+    {
+        $body = self::IPFS_BODY;
+        $body['disclosure']['copies'] = 3;
+        $result = self::disclosureCopyOf(self::baseReceipt(), $body);
+
+        $this->assertSame('fail', $result->disclosureCopy);
+        $this->assertStringContainsString('the IPFS document body cannot be canonicalized', self::notesOf($result));
+    }
+
+    public function testAV1IpfsBodyWhoseDisclosureHoldsANumberFailsAndDoesNotThrow(): void
+    {
+        $receipt = self::receiptWith(static function (array $consent): array {
+            unset($consent['legalBasis'], $consent['disclosureVersion']);
+            $consent['disclosureHash'] = self::sha256Of(self::DISCLOSURE);
+            return $consent;
+        });
+        $body = self::IPFS_BODY;
+        $body['disclosure']['copies'] = 3;
+        $result = self::disclosureCopyOf($receipt, $body);
+
+        $this->assertSame('fail', $result->disclosureCopy);
+        $this->assertStringContainsString('the IPFS document body cannot be canonicalized', self::notesOf($result));
+    }
 }

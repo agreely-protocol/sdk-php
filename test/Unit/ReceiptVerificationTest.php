@@ -440,6 +440,22 @@ final class ReceiptVerificationTest extends TestCase
         $this->assertSame('failed', $result->overall);
     }
 
+    public function testAReceiptBodyHoldingANumberFailsTheCompanySignatureAndDoesNotThrow(): void
+    {
+        $docs = self::didDocuments();
+        $receipt = self::companyReceipt();
+        /** @var array<string,mixed> $evidence */
+        $evidence = $receipt['evidence'] ?? [];
+        $evidence['attempts'] = 2;
+        $receipt['evidence'] = $evidence;
+
+        $result = Agreely::verifyReceipt($receipt, [
+            'resolver' => static fn (string $did): ?array => $docs[$did] ?? null,
+        ]);
+        $this->assertSame('fail', $result->companySignature);
+        $this->assertStringContainsString('the receipt body cannot be canonicalized', implode("\n", $result->notes));
+    }
+
     public function testMutatingItemPurposeBreaksTheCompanySignatureAndCellLabelBinding(): void
     {
         $docs = self::didDocuments();
