@@ -238,18 +238,31 @@ final class BundleVerificationTest extends TestCase
     }
 
     #[DataProvider('emitOnly')]
-    public function testABundleNamingAnEmitOnlyRegistryFailsAsAnUnknownRegistry(string $address): void
+    public function testABundleNamingAnEmitOnlyRegistryReadsUnavailableAsAnUnknownRegistryNeverVerified(string $address): void
     {
         $bundle = self::artefact('a1v1.bundle');
         /** @var array{didDocuments: array{issuer: array{delegation: array{body: array<string,mixed>}}}} $bundle */
         $bundle['didDocuments']['issuer']['delegation']['body']['registry'] = strtolower($address);
         $calls = [];
         $result = self::verify($bundle, self::SEPOLIA + ['httpPost' => self::rpc(static fn (): array => ['result', RegistryAnswers::rootWord(3)], $calls)]);
-        $this->assertSame('fail', $result->consentAnchor);
+        $this->assertSame('unavailable', $result->consentAnchor);
+        $this->assertSame('unavailable', $result->overall);
         $this->assertStringContainsString(
-            'the bundle names the registry ' . strtolower($address) . ' on chainId 84532, which is not a known registry for chainId 84532',
+            'unknown registry: the bundle names the registry ' . strtolower($address) . ' on chainId 84532, which is not a known registry for chainId 84532',
             implode("\n", $result->notes),
         );
+        $this->assertSame([], $calls);
+    }
+
+    public function testACidBundleNamingTheEmitOnlyRegistryReadsItsDocumentAnchorUnavailableWithNoRpc(): void
+    {
+        $bundle = self::artefact('cidv1.bundle');
+        /** @var array{didDocuments: array{issuer: array{delegation: array{body: array<string,mixed>}}}} $bundle */
+        $bundle['didDocuments']['issuer']['delegation']['body']['registry'] = strtolower(self::EMIT_ONLY[0]);
+        $calls = [];
+        $result = self::verify($bundle, self::SEPOLIA + ['httpPost' => self::rpc(static fn (): array => ['result', RegistryAnswers::rootWord(3)], $calls)]);
+        $this->assertSame('unavailable', $result->documentAnchor);
+        $this->assertNotSame('verified', $result->overall);
         $this->assertSame([], $calls);
     }
 
@@ -259,7 +272,8 @@ final class BundleVerificationTest extends TestCase
             $calls = [];
             $result = self::verify(self::artefact($name), self::SEPOLIA + ['httpPost' => self::rpc(static fn (): array => ['result', RegistryAnswers::rootWord(3)], $calls)]);
             $this->assertSame(['pass', 'pass', 'pass'], [$result->companySignature, $result->receiptIntegrity, $result->citizenAssertion], $name);
-            $this->assertSame('fail', $result->consentAnchor, $name);
+            $this->assertSame('unavailable', $result->consentAnchor, $name);
+            $this->assertSame('unavailable', $result->overall, $name);
             $this->assertNotSame('pass', $result->documentAnchor, $name);
             $this->assertSame([], $calls, $name);
         }
@@ -272,7 +286,8 @@ final class BundleVerificationTest extends TestCase
         $bundle['didDocuments']['issuer']['delegation']['body']['chainId'] = '8453';
         $calls = [];
         $result = self::verify($bundle, self::SEPOLIA + ['httpPost' => self::rpc(static fn (): array => ['result', RegistryAnswers::rootWord(3)], $calls)]);
-        $this->assertSame('fail', $result->consentAnchor);
+        $this->assertSame('unavailable', $result->consentAnchor);
+        $this->assertNotSame('verified', $result->overall);
         $this->assertSame([], $calls);
     }
 
@@ -311,11 +326,72 @@ final class BundleVerificationTest extends TestCase
         $result = self::verify($bundle, self::SEPOLIA + [
             'httpPost' => self::rpc(static fn (string $m): array => ['result', $m === 'eth_call' ? RegistryAnswers::anchorWord($root, 1760000000, 1760000600, 2) : null], $calls),
         ]);
-        $this->assertSame('fail', $result->consentAnchor);
+        $this->assertSame('withdrawn', $result->consentAnchor);
         $first = ($result->consentAnchorRecords ?? [])[0] ?? [];
         $this->assertSame('withdrawn', $first['state'] ?? null);
         $this->assertSame(1760000600, $first['revokedAt'] ?? null);
         $this->assertStringContainsString('WITHDRAWN', implode("\n", $result->notes));
+        $this->assertStringContainsString('NOT a forgery', implode("\n", $result->notes));
+    }
+
+    public function testAnAuthenticWithdrawnConsentIsOverallWithdrawnOnlyWhenEverythingElseVerified(): void
+    {
+        $bundle = self::readable('a1v1.bundle');
+        $root = is_string($bundle['merkleRoot'] ?? null) ? $bundle['merkleRoot'] : '';
+        $calls = [];
+        $result = self::verify($bundle, self::SEPOLIA + [
+            'httpPost' => self::rpc(static fn (string $m): array => ['result', $m === 'eth_call' ? RegistryAnswers::anchorWord($root, 1760000000, 1760000600, 2) : null], $calls),
+        ]);
+        $this->assertSame(['pass', 'pass', 'pass'], [$result->companySignature, $result->receiptIntegrity, $result->citizenAssertion]);
+        $this->assertSame('withdrawn', $result->overall);
+    }
+
+    public function testAWithdrawnConsentBesideAFailedDocumentAnchorIsFailed(): void
+    {
+        $bundle = self::readable('cidv1.bundle');
+        $root = is_string($bundle['merkleRoot'] ?? null) ? $bundle['merkleRoot'] : '';
+        $calls = [];
+        $result = self::verify($bundle, self::SEPOLIA + [
+            'httpPost' => self::rpc(
+                static fn (string $m, array $p): array => ['result', $m !== 'eth_call' ? null
+                    : (self::selectorOf($p) === '0x6d6f398e' ? RegistryAnswers::rootWord(0) : RegistryAnswers::anchorWord($root, 1760000000, 1760000600, 2))],
+                $calls,
+            ),
+        ]);
+        $this->assertSame('fail', $result->documentAnchor);
+        $this->assertSame('withdrawn', $result->consentAnchor);
+        $this->assertSame('failed', $result->overall);
+    }
+
+    public function testAWithdrawnConsentBesideAnUnavailableDocumentAnchorStaysWithdrawn(): void
+    {
+        $bundle = self::readable('cidv1.bundle');
+        $root = is_string($bundle['merkleRoot'] ?? null) ? $bundle['merkleRoot'] : '';
+        $calls = [];
+        $result = self::verify($bundle, self::SEPOLIA + [
+            'httpPost' => self::rpc(
+                static fn (string $m, array $p): array => match (true) {
+                    $m !== 'eth_call' => ['result', null],
+                    self::selectorOf($p) === '0x6d6f398e' => ['down'],
+                    default => ['result', RegistryAnswers::anchorWord($root, 1760000000, 1760000600, 2)],
+                },
+                $calls,
+            ),
+        ]);
+        $this->assertSame('unavailable', $result->documentAnchor);
+        $this->assertSame('withdrawn', $result->consentAnchor);
+        $this->assertSame('withdrawn', $result->overall);
+    }
+
+    public function testOnBaseMainnetWithNoRegistryTheConsentAnchorReadsUnavailableWithNoRpc(): void
+    {
+        $bundle = self::readable('a1v1.bundle');
+        $root = is_string($bundle['merkleRoot'] ?? null) ? $bundle['merkleRoot'] : '';
+        $calls = [];
+        $result = self::verify($bundle, ['rpcUrl' => 'https://rpc.test', 'chainId' => 8453, 'httpPost' => self::rpc(static fn (): array => ['result', RegistryAnswers::anchorWord($root, 1760000000)], $calls)]);
+        $this->assertSame('unavailable', $result->consentAnchor);
+        $this->assertStringContainsString('no known registry for this chain (chainId 8453)', implode("\n", $result->notes));
+        $this->assertSame([], array_filter($calls, static fn (array $c): bool => $c['method'] === 'eth_call'));
     }
 
     public function testAFourWordAnswerIsUnreadableNeverARecord(): void

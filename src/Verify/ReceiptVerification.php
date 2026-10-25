@@ -10,13 +10,15 @@ namespace Agreely\Sdk\Verify;
  * was PROVED vs merely trusted, and `overall` never overstates it.
  *
  * input: 'bundle' | 'receipt'. Statuses are strings: 'pass' | 'fail' | 'unavailable'
- * | 'unbound' | 'skipped' | 'unsupported' ('unavailable' = the check could not
+ * | 'unbound' | 'withdrawn' | 'skipped' | 'unsupported' ('unavailable' = the check could not
  * complete, distinct from 'fail', a real mismatch; 'unbound' = a passkey assertion
- * that verifies but that nothing ties to the receipt's content). overall: 'verified'
- * | 'partial' | 'incomplete' (a bare passkey receipt: verify its bundle) | 'failed' |
- * 'unavailable' | 'malformed' (a file the verifier cannot read: another bundle version,
- * a non-object receipt or offer, a number, nesting past 64 levels; no check ran, and it
- * says nothing about alteration). receiptType: 'company_attested' | 'company_documented'
+ * that verifies but that nothing ties to the receipt's content; 'withdrawn' = an authentic
+ * consent under the receipt's root whose withdrawal the chain records: neither a pass nor
+ * a forgery). overall: 'verified' | 'partial' | 'incomplete' (a bare passkey receipt:
+ * verify its bundle) | 'failed' | 'unavailable' | 'malformed' (a file the verifier cannot
+ * read: another bundle version, a non-object receipt or offer, a number, nesting past 64
+ * levels; no check ran, and it says nothing about alteration) | 'withdrawn' (every other
+ * decisive check verified, and the consent was withdrawn on chain). receiptType: 'company_attested' | 'company_documented'
  * (a verbal, telephone receipt: at most 'partial') | 'citizen'.
  */
 final class ReceiptVerification

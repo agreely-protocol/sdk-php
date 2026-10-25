@@ -69,7 +69,7 @@ use Throwable;
  *   - rpcUrl, registryAddress, chainId: opt-in on-chain documentAnchor and consentAnchor, read by
  *                          eth_call. registryAddress (any address, read by eth_call) defaults to the
  *                          known registry of chainId; Base mainnet (8453) has none yet: pass it there,
- *                          or the anchor checks fail with "no known registry for this chain"
+ *                          or the anchor checks read "unavailable" with "no known registry for this chain"
  *   - timeoutMs:           int, default 10000, per HTTP call
  *   - rpcDeadlineMs:       int, default 30000: the whole on-chain sequence of one verification,
  *                          from its first RPC call; past it the pending anchor checks read "unavailable"
@@ -170,6 +170,8 @@ final class ReceiptVerifier
     private ?array $documentRecord = null;
     /** @var list<array{consentRef:string, state:string, anchoredAt:int, revokedAt:int, anchoredBlock:int}>|null */
     private ?array $consentRecords = null;
+    /** Set when the bundle names a registry this SDK does not read: the anchors are then never verified. */
+    private bool $registryRefused = false;
 
     /** @param array<string,mixed> $opts */
     public function __construct(private readonly array $opts = [])
@@ -218,6 +220,7 @@ final class ReceiptVerifier
         $this->namedRegistry = null;
         $this->documentRecord = null;
         $this->consentRecords = null;
+        $this->registryRefused = false;
         if (is_string($input)) {
             $decoded = self::decodeJson($input);
             if ($decoded === null) {
@@ -296,7 +299,7 @@ final class ReceiptVerifier
 
         if ($companySignature === 'fail' || $disclosureCopy === 'fail' || $documentAnchor === 'fail') {
             $overall = 'failed';
-        } elseif ($companySignature === 'unavailable') {
+        } elseif ($companySignature === 'unavailable' || $this->registryRefused) {
             $overall = 'unavailable';
         } else {
             // A telephone receipt is the organisation's word, authenticated: never more than partial.
@@ -433,8 +436,9 @@ final class ReceiptVerifier
         $checks = [$companySignature, $receiptIntegrity, $citizenAssertion, $disclosureCopy, $documentAnchor, $consentAnchor];
         if (in_array('fail', $checks, true)) {
             $overall = 'failed';
-        } elseif ($companySignature === 'pass' && $receiptIntegrity === 'pass' && $citizenAssertion === 'pass') {
-            $overall = 'verified';
+        } elseif ($companySignature === 'pass' && $receiptIntegrity === 'pass' && $citizenAssertion === 'pass' && !$this->registryRefused) {
+            // A bundle that names a registry this SDK does not read is never verified, however sound its signatures.
+            $overall = $consentAnchor === 'withdrawn' ? 'withdrawn' : 'verified';
         } else {
             $overall = 'unavailable';
         }
@@ -781,8 +785,8 @@ final class ReceiptVerifier
         $chainId = $this->chainId();
         $target = $this->registryToRead();
         if (!$target['ok']) {
-            $notes[] = "documentAnchor FAILED: {$target['reason']}";
-            return 'fail';
+            $notes[] = "documentAnchor UNAVAILABLE: {$target['reason']} Nothing was read on chain.";
+            return 'unavailable';
         }
 
         $selector = substr(Keccak::hashHex('rootOf(bytes32)'), 0, 10);
@@ -839,8 +843,8 @@ final class ReceiptVerifier
         $chainId = $this->chainId();
         $target = $this->registryToRead();
         if (!$target['ok']) {
-            $notes[] = "consentAnchor FAILED: {$target['reason']}";
-            return 'fail';
+            $notes[] = "consentAnchor UNAVAILABLE: {$target['reason']}";
+            return 'unavailable';
         }
 
         $root = strtolower(self::stripHex($merkleRoot));
@@ -886,9 +890,10 @@ final class ReceiptVerifier
         $counts = "{$total} cell(s): {$active} active, {$withdrawn} withdrawn, {$pending} not anchored yet, {$unread} unreadable";
         $blocks = implode(', ', array_values(array_unique(array_column($records, 'anchoredBlock'))));
         if ($withdrawn > 0) {
-            $notes[] = "consentAnchor FAILED: WITHDRAWN on chainId {$chainId} ({$counts}). The chain records the consent under "
-                . "this bundle's Merkle root, anchored in block {$blocks}, and records its withdrawal: it is no longer in force.";
-            return 'fail';
+            $notes[] = "consentAnchor WITHDRAWN on chainId {$chainId} ({$counts}). The chain records the consent under "
+                . "this bundle's Merkle root, anchored in block {$blocks}, and records its withdrawal: it is authentic, but "
+                . 'it is no longer in force. This is NOT a forgery.';
+            return 'withdrawn';
         }
         if ($active !== $total) {
             $notes[] = "consentAnchor UNAVAILABLE on chainId {$chainId} ({$counts}). Anchoring is asynchronous and an RPC can "
@@ -936,10 +941,11 @@ final class ReceiptVerifier
             && (strtolower($named['registry']) !== strtolower($address) || ($named['chainId'] !== '' && $named['chainId'] !== (string) $chainId))
         ) {
             $on = $named['chainId'] !== '' ? " on chainId {$named['chainId']}" : '';
+            $this->registryRefused = true;
             return [
                 'ok' => false,
-                'reason' => "the bundle names the registry {$named['registry']}{$on}, which is not a known registry for chainId {$chainId}. "
-                    . 'Nothing was read on chain.',
+                'reason' => "unknown registry: the bundle names the registry {$named['registry']}{$on}, which is not a known "
+                    . "registry for chainId {$chainId}. Nothing was read on chain.",
             ];
         }
         return ['ok' => true, 'address' => $address];
