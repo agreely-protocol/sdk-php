@@ -68,8 +68,8 @@ use Throwable;
  *   - httpPost:            callable(string $url, string $body): ?string: JSON-RPC, null on any failure
  *   - rpcUrl, registryAddress, chainId: opt-in on-chain documentAnchor and consentAnchor, read by
  *                          eth_call. registryAddress (any address, read by eth_call) defaults to the
- *                          known registry of chainId; Base mainnet (8453) has none yet: pass it there,
- *                          or the anchor checks read "unavailable" with "no known registry for this chain"
+ *                          known registry of chainId (Base mainnet and Base Sepolia are known). On any
+ *                          other chain, pass it, or the anchor checks read "unavailable"
  *   - timeoutMs:           int, default 10000, per HTTP call
  *   - rpcDeadlineMs:       int, default 30000: the whole on-chain sequence of one verification,
  *                          from its first RPC call; past it the pending anchor checks read "unavailable"
