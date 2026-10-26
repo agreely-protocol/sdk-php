@@ -384,15 +384,18 @@ final class BundleVerificationTest extends TestCase
         $this->assertSame('withdrawn', $result->overall);
     }
 
-    public function testOnBaseMainnetWithNoRegistryTheConsentAnchorReadsUnavailableWithNoRpc(): void
+    public function testOnBaseMainnetTheConsentAnchorIsReadAtTheMainnetRegistryByEthCall(): void
     {
-        $bundle = self::readable('a1v1.bundle');
+        $bundle = RegistryAnswers::onMainnetRegistry(self::artefact('a1v1.bundle'));
         $root = is_string($bundle['merkleRoot'] ?? null) ? $bundle['merkleRoot'] : '';
         $calls = [];
-        $result = self::verify($bundle, ['rpcUrl' => 'https://rpc.test', 'chainId' => 8453, 'httpPost' => self::rpc(static fn (): array => ['result', RegistryAnswers::anchorWord($root, 1760000000)], $calls)]);
-        $this->assertSame('unavailable', $result->consentAnchor);
-        $this->assertStringContainsString('no known registry for this chain (chainId 8453)', implode("\n", $result->notes));
-        $this->assertSame([], array_filter($calls, static fn (array $c): bool => $c['method'] === 'eth_call'));
+        $result = self::verify($bundle, ['rpcUrl' => 'https://rpc.test', 'chainId' => 8453, 'httpPost' => self::rpc(static fn (string $m): array => ['result', $m === 'eth_call' ? RegistryAnswers::anchorWord($root, 1760000000) : null], $calls)]);
+        $this->assertSame('pass', $result->consentAnchor);
+        $this->assertStringNotContainsString('no known registry', implode("\n", $result->notes));
+        $call = array_values(array_filter($calls, static fn (array $c): bool => $c['method'] === 'eth_call'))[0];
+        /** @var array{to:string} $tx */
+        $tx = $call['params'][0];
+        $this->assertSame(RegistryAnswers::MAINNET_REGISTRY, $tx['to']);
     }
 
     public function testAFourWordAnswerIsUnreadableNeverARecord(): void

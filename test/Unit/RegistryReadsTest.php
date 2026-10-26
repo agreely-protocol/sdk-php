@@ -122,6 +122,14 @@ final class RegistryReadsTest extends TestCase
         $this->assertStringContainsString('"to":"' . strtolower(RegistryAnswers::SEPOLIA_REGISTRY) . '"', $sent[0]);
     }
 
+    public function testBaseMainnetTheDefaultChainIsReadAtTheRegistryItServesByEthCall(): void
+    {
+        $sent = self::sentTo(null);
+        $this->assertCount(1, $sent);
+        $this->assertStringContainsString('"to":"' . strtolower(RegistryAnswers::MAINNET_REGISTRY) . '"', $sent[0]);
+        $this->assertSame($sent, self::sentTo(8453));
+    }
+
     /** @return array<string, array{?int}> */
     public static function chains(): array
     {
@@ -129,10 +137,10 @@ final class RegistryReadsTest extends TestCase
     }
 
     #[DataProvider('chains')]
-    public function testNoChainEverReadsAnEmitOnlyRegistry(?int $chainId): void
+    public function testEveryChainReadsOneRegistryByEthCallAndNeverAnEmitOnlyOne(?int $chainId): void
     {
         $sent = self::sentTo($chainId);
-        $this->assertCount($chainId === 84532 ? 1 : 0, $sent);
+        $this->assertCount(1, $sent);
         foreach ($sent as $body) {
             foreach (self::EMIT_ONLY as $address) {
                 $this->assertStringNotContainsString($address, $body);

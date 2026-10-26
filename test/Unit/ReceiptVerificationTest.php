@@ -230,14 +230,15 @@ final class ReceiptVerificationTest extends TestCase
         $this->assertStringContainsString('a tagged document', implode("\n", $result->notes));
     }
 
-    public function testOnBaseMainnetWithNoRegistryKnownTheAnchorCheckReadsUnavailableAndReadsNothing(): void
+    public function testOnBaseMainnetTheDefaultChainAnchorCheckIsReadAtTheMainnetRegistry(): void
     {
         $sent = [];
         $result = $this->verifyCitizenReceipt([], RegistryAnswers::rootWord(3), $sent);
 
-        $this->assertSame('unavailable', $result->documentAnchor);
-        $this->assertStringContainsString('no known registry for this chain (chainId 8453)', implode("\n", $result->notes));
-        $this->assertSame([], $sent);
+        $this->assertSame('pass', $result->documentAnchor);
+        $this->assertStringNotContainsString('no known registry', implode("\n", $result->notes));
+        $this->assertCount(1, $sent);
+        $this->assertSame(RegistryAnswers::MAINNET_REGISTRY, $sent[0]['to']);
     }
 
     public function testAnExplicitRegistryAddressIsReadByEthCall(): void

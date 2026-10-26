@@ -13,6 +13,9 @@ final class RegistryAnswers
     /** The AgreelyRegistry the SDK reads by default on Base Sepolia (84532), EIP-55 checksummed. */
     public const SEPOLIA_REGISTRY = '0xf25D3F8E73648C797Be2CCCD428061f357567b9A';
 
+    /** The AgreelyRegistry the SDK reads by default on Base mainnet (8453), EIP-55 checksummed. */
+    public const MAINNET_REGISTRY = '0x6F2cF94045cF0cbDD94338882c34D183575023E9';
+
     /**
      * The bundle with its issuer delegation naming the readable Sepolia registry instead of the emit-only one the
      * vectors were issued on. The SDK does not verify that delegation, so no signature it checks moves; regenerated
@@ -26,6 +29,20 @@ final class RegistryAnswers
         /** @var array{didDocuments: array{issuer: array{delegation: array{body: array<string,mixed>}}}} $bundle */
         $bundle['didDocuments']['issuer']['delegation']['body']['registry'] = strtolower(self::SEPOLIA_REGISTRY);
         $bundle['didDocuments']['issuer']['delegation']['body']['chainId'] = '84532';
+        return $bundle;
+    }
+
+    /**
+     * The same bundle with its issuer delegation naming the Base mainnet registry on chainId 8453.
+     *
+     * @param array<string,mixed> $bundle
+     * @return array<string,mixed>
+     */
+    public static function onMainnetRegistry(array $bundle): array
+    {
+        /** @var array{didDocuments: array{issuer: array{delegation: array{body: array<string,mixed>}}}} $bundle */
+        $bundle['didDocuments']['issuer']['delegation']['body']['registry'] = strtolower(self::MAINNET_REGISTRY);
+        $bundle['didDocuments']['issuer']['delegation']['body']['chainId'] = '8453';
         return $bundle;
     }
 
