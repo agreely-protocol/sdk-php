@@ -140,6 +140,10 @@ final class ReceiptVerifier
     private const PASSKEY_RECEIPT_KEYS = ['@context', 'type', 'id', 'issuer', 'validFrom', 'validUntil', 'credentialSubject', 'proof'];
     private const PASSKEY_RECEIPT_TYPE = ['VerifiableCredential', 'ConsentReceipt'];
     private const PASSKEY_RECEIPT_CONTEXT = ['https://www.w3.org/ns/credentials/v2', 'https://agreely.ca/credentials/consent/v1'];
+    // No signature covers a proof's own members, so they are held to the exact shape the issuer writes
+    // (CompanyDidService::dataIntegrityProof, ConsentReceipt::build): exactly these keys, every value a string.
+    private const ISSUER_PROOF_KEYS = ['type', 'cryptosuite', 'created', 'verificationMethod', 'proofPurpose', 'proofValue'];
+    private const CITIZEN_PROOF_KEYS = ['type', 'verificationMethod', 'nonce', 'challenge', 'authenticatorData', 'clientDataJSON', 'signature'];
     private const BUNDLE_VERSION = '1';
     private const MAX_SAFE_INTEGER = 9007199254740991;
     private const RPC_TRANSPORT_FAILURE = 'the RPC call failed (transport error, HTTP error or timeout)';
@@ -290,14 +294,20 @@ final class ReceiptVerifier
         $notes[] = $type === 'company_attested'
             ? 'A company-attested receipt carries no citizen passkey assertion, so citizenAssertion is not applicable.'
             : 'A verbal (company-documented) receipt carries no citizen passkey assertion, so citizenAssertion is not applicable.';
-        // The signature is taken over the receipt body itself, so it IS the integrity check.
+        // The signature is taken over the receipt body itself, so it IS the integrity check, except for the proof's
+        // own members, which nothing signs.
+        $proofFailure = self::recordedProofFailure($r);
         $receiptIntegrity = $companySignature;
+        if ($proofFailure !== null) {
+            $receiptIntegrity = 'fail';
+            $notes[] = "Receipt integrity FAILED: {$proofFailure}.";
+        }
         $cellLabelBinding = self::assessRecordedCellLabels($companySignature, $notes);
         $disclosureCopy = $this->verifyRecordedDisclosureCopy($r, $notes);
         $documentAnchor = $this->verifyDocumentAnchor($r, $notes);
         $notes[] = 'consentAnchor skipped: a recorded receipt carries no consentRef to read on chain.';
 
-        if ($companySignature === 'fail' || $disclosureCopy === 'fail' || $documentAnchor === 'fail') {
+        if ($companySignature === 'fail' || $receiptIntegrity === 'fail' || $disclosureCopy === 'fail' || $documentAnchor === 'fail') {
             $overall = 'failed';
         } elseif ($companySignature === 'unavailable' || $this->registryRefused) {
             $overall = 'unavailable';
@@ -1163,16 +1173,121 @@ final class ReceiptVerifier
     }
 
     /**
+     * The person's WebAuthn assertion is proof[1], as ConsentReceipt::build writes it, never another position.
+     *
      * @param list<mixed> $proofs
      * @return array<array-key,mixed>|null
      */
     private static function findWebAuthnProof(array $proofs): ?array
     {
-        foreach ($proofs as $p) {
-            $obj = self::asObject($p);
-            if (self::asString($obj['type'] ?? null) === 'WebAuthnAssertion') {
-                return $obj;
+        $obj = self::asObject($proofs[1] ?? null);
+        return self::asString($obj['type'] ?? null) === 'WebAuthnAssertion' ? $obj : null;
+    }
+
+    /**
+     * Exactly `$keys`, every value a string; the members as an array, or null.
+     *
+     * @param list<string> $keys
+     * @return array<array-key,string>|null
+     */
+    private static function exactStringMembers(mixed $o, array $keys): ?array
+    {
+        if (!self::isPlainObject($o)) {
+            return null;
+        }
+        $members = self::asObject($o);
+        if (count($members) !== count($keys)) {
+            return null;
+        }
+        foreach ($keys as $k) {
+            if (!array_key_exists($k, $members) || !is_string($members[$k])) {
+                return null;
             }
+        }
+        /** @var array<array-key,string> $members */
+        return $members;
+    }
+
+    private static function controlledBy(string $vm, mixed $did): bool
+    {
+        return is_string($did) && $did !== '' && str_starts_with($vm, $did . '#');
+    }
+
+    /**
+     * proof[0] as the issuer writes it (verify-core.js issuerProofShaped): the company's eddsa-jcs-2022 proof.
+     *
+     * @return array<array-key,string>|null
+     */
+    private static function issuerProofShaped(mixed $proof, mixed $issuer): ?array
+    {
+        $p = self::exactStringMembers($proof, self::ISSUER_PROOF_KEYS);
+        return $p !== null
+            && $p['type'] === 'DataIntegrityProof'
+            && $p['cryptosuite'] === 'eddsa-jcs-2022'
+            && $p['proofPurpose'] === 'assertionMethod'
+            && self::controlledBy($p['verificationMethod'], $issuer) ? $p : null;
+    }
+
+    /**
+     * proof[1] as ConsentReceipt::build writes it (verify-core.js citizenProofShaped): the person's WebAuthn assertion.
+     *
+     * @return array<array-key,string>|null
+     */
+    private static function citizenProofShaped(mixed $proof, mixed $subject): ?array
+    {
+        $p = self::exactStringMembers($proof, self::CITIZEN_PROOF_KEYS);
+        return $p !== null
+            && $p['type'] === 'WebAuthnAssertion'
+            && self::controlledBy($p['verificationMethod'], $subject) ? $p : null;
+    }
+
+    /**
+     * A passkey receipt carries exactly the company's proof then the person's, and the members the issuer copies from
+     * the signed offer equal it (verify-core.js passkeyProofsShaped + proofMembersPinned). An offer without createdAt
+     * pins no `created`, as offerWindowOf skips it.
+     *
+     * @param array<array-key,mixed> $r
+     * @param array<array-key,mixed> $offer
+     */
+    private static function passkeyProofFailure(array $r, array $offer): ?string
+    {
+        $proof = self::asArray($r['proof'] ?? null);
+        $subject = self::asObject($r['credentialSubject'] ?? null)['id'] ?? null;
+        $issuerProof = self::issuerProofShaped($proof[0] ?? null, $r['issuer'] ?? null);
+        $citizenProof = self::citizenProofShaped($proof[1] ?? null, $subject);
+        if (count($proof) !== 2 || $issuerProof === null || $citizenProof === null) {
+            return "the proof array is not the company's DataIntegrityProof then the person's WebAuthnAssertion, each with exactly the members the issuer writes";
+        }
+        $createdAt = $offer['createdAt'] ?? null;
+        if (is_string($createdAt) && $issuerProof['created'] !== $createdAt) {
+            return "proof[0].created differs from the signed offer's createdAt";
+        }
+        if ($citizenProof['nonce'] !== ($offer['nonce'] ?? null)) {
+            return "proof[1].nonce differs from the signed offer's nonce";
+        }
+        return null;
+    }
+
+    /**
+     * A recorded receipt carries exactly one company proof, and a v2 to v4 one was created at its recordedAt.
+     *
+     * @param array<array-key,mixed> $r
+     */
+    private static function recordedProofFailure(array $r): ?string
+    {
+        $proof = self::asArray($r['proof'] ?? null);
+        $issuerProof = self::issuerProofShaped($proof[0] ?? null, $r['issuer'] ?? null);
+        if (count($proof) !== 1 || $issuerProof === null) {
+            return 'the proof array is not exactly one company DataIntegrityProof with the members the issuer writes';
+        }
+        // TRAP: a v1 receipt (no receiptVersion) pins nothing until production is measured to hold created === grantedAt.
+        if (!array_key_exists('receiptVersion', $r)) {
+            return null;
+        }
+        $consent = self::asObject(self::asObject($r['credentialSubject'] ?? null)['consent'] ?? null);
+        $recordedAt = $consent['recordedAt'] ?? null;
+        if (!is_string($recordedAt) || $issuerProof['created'] !== $recordedAt) {
+            return "proof[0].created differs from the consent's recordedAt";
         }
         return null;
     }
@@ -1196,8 +1311,9 @@ final class ReceiptVerifier
     }
 
     /**
-     * The method that checks proof[0] (did.js issuerKeyFromDoc): the one whose id is `$vmId`, controlled by the issuer,
-     * referenced under the document's `assertionMethod` (full id or '#fragment') and carrying a multibase key. A
+     * The method that checks proof[0] (did.js issuerKeyFromDoc): the one whose id is `$vmId`, an id under the issuer
+     * (issuer + '#' + fragment), controlled by the issuer, referenced under the document's `assertionMethod` (full id,
+     * or '#fragment', which resolves only as issuer + '#fragment') and carrying a multibase key. A
      * fragment of the issuer naming no method falls back to the document's SOLE assertionMethod method. Never the first
      * method: the document also lists the company's own `#recovery-1` key (capabilityInvocation), which Agreely never holds.
      *
@@ -1212,10 +1328,11 @@ final class ReceiptVerifier
             static fn (mixed $m): bool => is_array($m) && self::isPlainObject($m),
         ));
         $assertion = self::asArray($doc['assertionMethod'] ?? null);
-        $asserts = static function (array $m) use ($assertion): bool {
+        // A method named under another DID never checks proof[0], even one the issuer controls.
+        $asserts = static function (array $m) use ($assertion, $issuer): bool {
             $id = $m['id'] ?? null;
-            return is_string($id) && (in_array($id, $assertion, true)
-                || (str_contains($id, '#') && in_array('#' . explode('#', $id)[1], $assertion, true)));
+            return is_string($id) && $issuer !== '' && str_starts_with($id, $issuer . '#')
+                && (in_array($id, $assertion, true) || in_array(substr($id, strlen($issuer)), $assertion, true));
         };
         $named = array_values(array_filter($methods, static fn (array $m): bool => ($m['id'] ?? null) === $vmId));
         $vm = null;
@@ -1578,7 +1695,7 @@ final class ReceiptVerifier
         if (!is_string($r['validFrom'] ?? null) || $r['validFrom'] !== ($consent['grantedAt'] ?? null)) {
             return 'validFrom differs from grantedAt';
         }
-        return null;
+        return self::passkeyProofFailure($r, $offer);
     }
 
     /**

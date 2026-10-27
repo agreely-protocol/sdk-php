@@ -155,6 +155,46 @@ final class AssertionKeyTest extends TestCase
         $this->assertSame('fail', $result->companySignature);
     }
 
+    public function testAMethodNamedUnderAnotherDidNeverChecksTheReceiptEvenOneTheIssuerControlsAndListsByFragment(): void
+    {
+        $doc = self::f12()['issuerDocument'];
+        $foreign = 'did:web:elsewhere.example#kms-1';
+        /** @var list<array<string,mixed>> $methods */
+        $methods = $doc['verificationMethod'];
+        $methods[] = ['id' => $foreign] + $methods[0];
+        $doc['verificationMethod'] = $methods;
+        $doc['assertionMethod'] = ['#kms-1'];
+        $receipt = self::f12()['genuine'];
+        /** @var list<array<string,mixed>> $proof */
+        $proof = $receipt['proof'];
+        $proof[0]['verificationMethod'] = $foreign;
+        $receipt['proof'] = $proof;
+        $result = self::verify($receipt, $doc);
+        $this->assertSame('fail', $result->companySignature);
+        $this->assertSame('failed', $result->overall);
+    }
+
+    public function testARelativeFragmentUnderAssertionMethodResolvesOnlyAsTheIssuerPlusThatFragment(): void
+    {
+        $doc = self::f12()['issuerDocument'];
+        /** @var list<array<string,mixed>> $methods */
+        $methods = $doc['verificationMethod'];
+        $methods[0]['id'] = self::issuer() . '#kms-1#x';
+        $doc['verificationMethod'] = $methods;
+        $doc['assertionMethod'] = ['#kms-1'];
+        $result = self::verify(self::labelled(self::f12()['genuine'], '#kms-1#x'), $doc);
+        $this->assertSame('fail', $result->companySignature);
+    }
+
+    public function testARelativeFragmentUnderAssertionMethodNamesTheIssuersOwnMethod(): void
+    {
+        $doc = self::f12()['issuerDocument'];
+        $doc['assertionMethod'] = ['#kms-1'];
+        $result = self::verify(self::f12()['genuine'], $doc);
+        $this->assertSame('pass', $result->companySignature);
+        $this->assertSame('verified', $result->overall);
+    }
+
     public function testAnIssuerDocumentThatDoesNotResolveStaysUnavailable(): void
     {
         $result = Agreely::verifyReceipt(self::f12()['recoverySigned'], ['resolver' => static fn (string $did): ?array => null]);

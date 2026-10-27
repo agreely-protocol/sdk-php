@@ -96,8 +96,8 @@ final class ReceiptVerificationDisclosureV2Test extends TestCase
     }
 
     /**
-     * The passkey receipt the app derives from `$o`, signed (proof[0]) over the offer, in its bundle. No passkey
-     * proof: only the company half matters here.
+     * The passkey receipt the app derives from `$o`, signed (proof[0]) over the offer, in its bundle. proof[1] has the
+     * issued shape but signs nothing: only the company half matters here.
      *
      * @param array<string,mixed> $o
      * @param (callable(array<string,mixed>): array<string,mixed>)|null $editConsent
@@ -130,7 +130,18 @@ final class ReceiptVerificationDisclosureV2Test extends TestCase
                 'validFrom' => self::GRANTED_AT,
                 'validUntil' => '',
                 'credentialSubject' => ['id' => 'did:agreely:citizen:v2', 'consent' => $consent],
-                'proof' => [$this->company->proofOver($o)],
+                'proof' => [
+                    $this->company->proofOver($o),
+                    [
+                        'type' => 'WebAuthnAssertion',
+                        'verificationMethod' => 'did:agreely:citizen:v2#passkey-1',
+                        'nonce' => $o['nonce'],
+                        'challenge' => '0x' . str_repeat('00', 32),
+                        'authenticatorData' => '',
+                        'clientDataJSON' => '',
+                        'signature' => '',
+                    ],
+                ],
             ],
             'signedOffer' => $o,
             'merkleRoot' => '0x' . str_repeat('ab', 32),

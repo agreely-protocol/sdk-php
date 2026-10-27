@@ -274,7 +274,12 @@ final class CitizenKeyTest extends TestCase
         $receipt = $bundle['receipt'];
         /** @var list<mixed> $proof */
         $proof = $receipt['proof'];
-        $receipt['proof'] = [$company->proofOver($offer), $proof[1]];
+        $issuerProof = $company->proofOver($offer);
+        // The issuer writes proof[0].created from the offer's createdAt, and the verifier holds the two equal.
+        if (is_string($offer['createdAt'] ?? null)) {
+            $issuerProof['created'] = $offer['createdAt'];
+        }
+        $receipt['proof'] = [$issuerProof, $proof[1]];
         $bundle['receipt'] = $receipt;
         $bundle['signedOffer'] = $offer;
         return Agreely::verifyReceipt($bundle, ['resolver' => self::resolverFor($doc, $company->didDoc)]);
