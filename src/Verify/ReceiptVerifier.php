@@ -493,15 +493,14 @@ final class ReceiptVerifier
             return 'fail';
         }
 
-        $key = $this->resolveEd25519Key($issuer, $vm);
-        if ($key === null) {
-            $notes[] = "Company signature UNVERIFIABLE: could not resolve the issuer DID {$issuer} (key {$vm}) to an Ed25519 key "
-                . '(network/resolution failure or key not found). This is INCONCLUSIVE, NOT a signature mismatch.';
-            return 'unavailable';
+        $resolved = $this->resolveCompanyKey($issuer, $vm);
+        if ($resolved['kind'] !== 'key') {
+            return self::companyKeyRefused($resolved['kind'], $issuer, $vm, $notes);
         }
+        ['key' => $key, 'vmId' => $vmId] = $resolved;
 
         if (Signature::verifyEd25519($key, $canonical, $signature)) {
-            $notes[] = "Company signature verified against issuer DID {$issuer} (key {$vm}).";
+            $notes[] = "Company signature verified against issuer DID {$issuer} (key {$vmId}).";
             if ($type === 'company_documented') {
                 $scriptVersion = self::asString(self::asObject($r['evidence'] ?? null)['scriptVersion'] ?? null);
                 $notes[] = 'This proves the ORGANISATION documented a consent given by telephone under script version '
@@ -514,7 +513,7 @@ final class ReceiptVerifier
             return 'pass';
         }
 
-        $notes[] = "Company signature check FAILED against issuer DID {$issuer} (key {$vm}): the canonical receipt body does not "
+        $notes[] = "Company signature check FAILED against issuer DID {$issuer} (key {$vmId}): the canonical receipt body does not "
             . 'match the signature. The receipt was altered after signing or the wrong key was resolved.';
         return 'fail';
     }
@@ -552,17 +551,16 @@ final class ReceiptVerifier
             $notes[] = 'Company signature check FAILED: the proofValue is not a valid multibase signature.';
             return 'fail';
         }
-        $key = $this->resolveEd25519Key($issuer, $vm);
-        if ($key === null) {
-            $notes[] = "Company signature UNVERIFIABLE: could not resolve the issuer DID {$issuer} (key {$vm}) to an Ed25519 key "
-                . '(network/resolution failure or key not found). This is INCONCLUSIVE, NOT a signature mismatch.';
-            return 'unavailable';
+        $resolved = $this->resolveCompanyKey($issuer, $vm);
+        if ($resolved['kind'] !== 'key') {
+            return self::companyKeyRefused($resolved['kind'], $issuer, $vm, $notes);
         }
+        ['key' => $key, 'vmId' => $vmId] = $resolved;
         if (Signature::verifyEd25519($key, $canonical, $signature)) {
-            $notes[] = "Company signature over the signed offer verified against issuer DID {$issuer} (key {$vm}).";
+            $notes[] = "Company signature over the signed offer verified against issuer DID {$issuer} (key {$vmId}).";
             return 'pass';
         }
-        $notes[] = "Company signature check FAILED against issuer DID {$issuer} (key {$vm}): the signed offer does not match the "
+        $notes[] = "Company signature check FAILED against issuer DID {$issuer} (key {$vmId}): the signed offer does not match the "
             . 'signature. The offer was altered after signing or the wrong key was resolved.';
         return 'fail';
     }
@@ -991,18 +989,26 @@ final class ReceiptVerifier
         return ['ok' => true, 'result' => $json['result']];
     }
 
-    private function resolveEd25519Key(string $issuer, string $vmId): ?string
+    /**
+     * The key that checks proof[0] (companyKeyMethod). A document that did not resolve is "unresolved" (unavailable); a
+     * resolved one with no such method, or whose method carries no Ed25519 multikey, is "unlisted" (fail).
+     *
+     * @return array{kind:'unresolved'}|array{kind:'unlisted'}|array{kind:'key', key:string, vmId:string}
+     */
+    private function resolveCompanyKey(string $issuer, string $vmId): array
     {
         $doc = $this->resolveDid($issuer);
-        $vm = self::pickVerificationMethod($doc, $vmId);
-        $mb = self::asString($vm['publicKeyMultibase'] ?? null);
-        if ($mb === '') {
-            return null;
+        if ($doc === null || !self::isPlainObject($doc)) {
+            return ['kind' => 'unresolved'];
+        }
+        $vm = self::companyKeyMethod($doc, $issuer, $vmId);
+        if ($vm === null) {
+            return ['kind' => 'unlisted'];
         }
         try {
-            return Multibase::decodeEd25519PublicKey($mb);
+            return ['kind' => 'key', 'key' => Multibase::decodeEd25519PublicKey($vm['publicKeyMultibase']), 'vmId' => $vm['id']];
         } catch (Throwable) {
-            return null;
+            return ['kind' => 'unlisted'];
         }
     }
 
@@ -1172,25 +1178,59 @@ final class ReceiptVerifier
     }
 
     /**
-     * @param array<array-key,mixed>|null $doc
-     * @return array<array-key,mixed>|null
+     * The note and verdict when no key checks proof[0]: an unresolved document is inconclusive, an unlisted key fails.
+     *
+     * @param 'unresolved'|'unlisted' $kind
+     * @param list<string> $notes
      */
-    private static function pickVerificationMethod(?array $doc, string $vmId): ?array
+    private static function companyKeyRefused(string $kind, string $issuer, string $vm, array &$notes): string
     {
-        if ($doc === null || !self::isPlainObject($doc)) {
-            return null;
+        if ($kind === 'unresolved') {
+            $notes[] = "Company signature UNVERIFIABLE: could not resolve the issuer DID {$issuer} (key {$vm}) to an Ed25519 key "
+                . '(network/resolution failure or key not found). This is INCONCLUSIVE, NOT a signature mismatch.';
+            return 'unavailable';
         }
+        $notes[] = "Company signature check FAILED: the issuer DID document of {$issuer} lists no Ed25519 key under assertionMethod "
+            . "for proof[0] (key {$vm}), so no key of the company may check this signature.";
+        return 'fail';
+    }
+
+    /**
+     * The method that checks proof[0] (did.js issuerKeyFromDoc): the one whose id is `$vmId`, controlled by the issuer,
+     * referenced under the document's `assertionMethod` (full id or '#fragment') and carrying a multibase key. A
+     * fragment of the issuer naming no method falls back to the document's SOLE assertionMethod method. Never the first
+     * method: the document also lists the company's own `#recovery-1` key (capabilityInvocation), which Agreely never holds.
+     *
+     * @param array<array-key,mixed> $doc
+     * @return array{id:string, publicKeyMultibase:string}|null
+     */
+    private static function companyKeyMethod(array $doc, string $issuer, string $vmId): ?array
+    {
+        // A resolved document is outside input too: an entry that is not an object is skipped, never dereferenced.
         $methods = array_values(array_filter(
             self::asArray($doc['verificationMethod'] ?? null),
             static fn (mixed $m): bool => is_array($m) && self::isPlainObject($m),
         ));
-        foreach ($methods as $m) {
-            if (is_array($m) && ($m['id'] ?? null) === $vmId) {
-                return $m;
-            }
+        $assertion = self::asArray($doc['assertionMethod'] ?? null);
+        $asserts = static function (array $m) use ($assertion): bool {
+            $id = $m['id'] ?? null;
+            return is_string($id) && (in_array($id, $assertion, true)
+                || (str_contains($id, '#') && in_array('#' . explode('#', $id)[1], $assertion, true)));
+        };
+        $named = array_values(array_filter($methods, static fn (array $m): bool => ($m['id'] ?? null) === $vmId));
+        $vm = null;
+        if (count($named) === 1) {
+            $vm = $named[0];
+        } elseif ($named === [] && $issuer !== '' && str_starts_with($vmId, $issuer . '#')) {
+            $listed = array_values(array_filter($methods, $asserts));
+            $vm = count($listed) === 1 ? $listed[0] : null;
         }
-        $first = $methods[0] ?? null;
-        return is_array($first) ? $first : null;
+        if ($vm === null || ($vm['controller'] ?? null) !== $issuer || !$asserts($vm)) {
+            return null;
+        }
+        $id = $vm['id'] ?? null;
+        $multibase = $vm['publicKeyMultibase'] ?? null;
+        return is_string($id) && is_string($multibase) ? ['id' => $id, 'publicKeyMultibase' => $multibase] : null;
     }
 
     /**

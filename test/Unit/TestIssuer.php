@@ -30,6 +30,7 @@ final class TestIssuer
                 'controller' => $issuer,
                 'publicKeyMultibase' => 'z' . self::base58("\xed\x01" . sodium_crypto_sign_publickey($pair)),
             ]],
+            'assertionMethod' => [$this->vm],
         ];
     }
 

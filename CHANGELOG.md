@@ -4,6 +4,16 @@ All notable changes to `agreely/sdk` (PHP) are documented here. This project
 adheres to [Semantic Versioning](https://semver.org/). Packagist reads the git
 tag as the released version.
 
+## 0.6.1 - Unreleased
+
+### Changed
+
+- `Agreely::verifyReceipt` checks the company signature only with the method
+  `proof[0].verificationMethod` names, controlled by the issuer and listed under the
+  issuer document's `assertionMethod` (a fragment naming no method uses the document's
+  sole `assertionMethod` key). A resolved document with no such key gives
+  `companySignature: "fail"`, and the notes name the key that checked the signature.
+
 ## 0.6.0 - 2026-10-27
 
 ### Added

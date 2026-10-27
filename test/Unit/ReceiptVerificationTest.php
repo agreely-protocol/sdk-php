@@ -702,6 +702,7 @@ final class ReceiptVerificationTest extends TestCase
                 'controller' => $did,
                 'publicKeyMultibase' => 'z' . self::base58("\xed\x01" . sodium_crypto_sign_publickey($pair)),
             ]],
+            'assertionMethod' => [$vm],
         ];
         $resolver = static fn (string $asked): ?array => $asked === $did ? $doc : null;
         return [$body, $resolver];
