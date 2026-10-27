@@ -6,7 +6,27 @@ tag as the released version.
 
 ## 0.6.2 - Unreleased
 
+### Added
+
+- **`ReceiptVerification::$withdrawal`** says whether the consent is still in force:
+  `active` when every accepted cell was read on chain (`rpcUrl`) under the bundle's
+  Merkle root and none is withdrawn, `withdrawn` when the chain records a cell's
+  withdrawal, with `$withdrawnAt` (unix seconds) when the record carries it, and
+  `not_checked` otherwise: no `rpcUrl`, a paper, telephone or bare passkey receipt,
+  or a read that did not cover every cell. `overall` is unchanged by it.
+- `ReceiptVerification` carries `$consentAnchorCounts` (cells, active, withdrawn,
+  pending, unreadable, set when the consent anchor read ran and did not fail) and
+  `$registryRefused`, and `toArray()` gives them in the TS SDK's shape.
+
 ### Changed
+
+- **The consent anchor counts every accepted cell the receipt lists.** A cell whose
+  consentRef the bundle does not name counts as unreadable, so `consentAnchor` reads
+  `unavailable`, never `pass`, and `consentAnchorCounts['cells']` is the larger of
+  the two counts.
+- **A passkey receipt in a bundle carrying a field the issuer never writes** (at its
+  top level, in `credentialSubject` or in its consent) reads `overall` `malformed`,
+  with no check run.
 
 - **`Agreely::verifyReceipt` holds the proof array to the shape the issuer
   writes.** A passkey receipt carries exactly two proofs, the company's

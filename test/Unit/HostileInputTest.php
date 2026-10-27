@@ -231,10 +231,40 @@ final class HostileInputTest extends TestCase
 
     // --- R6: top-level receipt keys in a passkey bundle -------------------------------
 
+    /** @return iterable<string,array{0:list<string>,1:string}> */
+    public static function fieldsNeverWritten(): iterable
+    {
+        yield 'an extra top-level key' => [['extraTop'], 'carries a top-level field the issuer never writes'];
+        yield 'an extra credentialSubject key' => [['credentialSubject', 'status'], 'credentialSubject carries a field the issuer never writes'];
+        yield 'an extra consent key' => [['credentialSubject', 'consent', 'status'], 'consent carries a field the issuer never writes'];
+    }
+
+    /** @param list<string> $path */
+    #[DataProvider('fieldsNeverWritten')]
+    public function testAFieldTheIssuerNeverWritesIsMalformedNeverATamper(array $path, string $wording): void
+    {
+        $bundle = self::artefact('a1v1.bundle');
+        /** @var array<string,mixed> $receipt */
+        $receipt = $bundle['receipt'];
+        $node = &$receipt;
+        foreach ($path as $key) {
+            if (!is_array($node)) {
+                $this->fail('the path does not lead to an object');
+            }
+            $node = &$node[$key];
+        }
+        $node = 'active';
+        unset($node);
+        $bundle['receipt'] = $receipt;
+        $result = self::verify($bundle);
+        $this->assertSame('malformed', $result->overall);
+        $this->assertSame(['skipped', 'skipped', 'skipped'], [$result->companySignature, $result->receiptIntegrity, $result->citizenAssertion]);
+        $this->assertStringContainsString($wording, implode("\n", $result->notes));
+    }
+
     /** @return iterable<string,array{0:string,1:mixed}> */
     public static function topLevelEdits(): iterable
     {
-        yield 'an extra top-level key' => ['extraTop', ['claim' => 'x']];
         yield 'a changed type' => ['type', ['VerifiableCredential', 'ConsentReceipt', 'Extra']];
         yield 'a changed @context' => ['@context', ['https://evil.example/ctx']];
         yield 'an id that is not a receipt urn' => ['id', 'https://evil.example/receipt'];

@@ -124,15 +124,40 @@ final class ReceiptVerificationTest extends TestCase
             $opts['httpGet'] = static fn (string $url): string => $body;
         }
 
+        if (is_array($case['chain'] ?? null)) {
+            /** @var array{chainId:int, registryAddress:string, registryAnswer:string} $chain */
+            $chain = $case['chain'];
+            $opts['rpcUrl'] = 'https://rpc.test';
+            $opts['chainId'] = $chain['chainId'];
+            $opts['registryAddress'] = $chain['registryAddress'];
+            $opts['httpPost'] = static function (string $url, string $body) use ($chain): string {
+                /** @var array{method?:string, params?:list<array{data?:string}>} $req */
+                $req = json_decode($body, true);
+                $data = $req['params'][0]['data'] ?? '';
+                return (string) json_encode(($req['method'] ?? '') === 'eth_call' && str_starts_with($data, '0x7ef50298')
+                    ? ['jsonrpc' => '2.0', 'id' => 1, 'result' => $chain['registryAnswer']]
+                    : ['jsonrpc' => '2.0', 'id' => 1, 'error' => ['message' => 'not served by this vector']]);
+            };
+        }
+
         $input = json_decode((string) file_get_contents($dir . Wire::str($case['file'])), true);
         $result = Agreely::verifyReceipt($input, $opts);
 
         $canon = new Canonicalizer();
         $this->assertSame(
-            $canon->encode($case['expect']),
-            $canon->encode($result->toArray()),
+            $canon->encode(self::numbersAsStrings($case['expect'])),
+            $canon->encode(self::numbersAsStrings($result->toArray())),
             'ReceiptVerification drifted from the golden vector (TS<->PHP parity).',
         );
+    }
+
+    /** The canonicalizer refuses numbers; a chain read carries integers (unix seconds, blocks, counts), compared as their digits. */
+    private static function numbersAsStrings(mixed $value): mixed
+    {
+        if (is_int($value)) {
+            return (string) $value;
+        }
+        return is_array($value) ? array_map(self::numbersAsStrings(...), $value) : $value;
     }
 
     public function testCitizenAssertionFailsOnAChallengeMismatch(): void

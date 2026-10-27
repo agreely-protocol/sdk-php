@@ -47,7 +47,8 @@ use Throwable;
  * Anyone can write a bundle that carries their own key under someone else's DID.
  *
  * The input is hostile: anything this verifier cannot read (a bundle of another version, a
- * non-object receipt or offer, a number, nesting past MAX_INPUT_DEPTH) reads "malformed", and
+ * non-object receipt or offer, a passkey receipt carrying a field the issuer never writes, a
+ * number, nesting past MAX_INPUT_DEPTH) reads "malformed", and
  * verify() returns on every input, a deep one included. The citizen half is checked only for a
  * did:agreely:citizen: subject, whatever the resolver.
  *
@@ -174,6 +175,8 @@ final class ReceiptVerifier
     private ?array $documentRecord = null;
     /** @var list<array{consentRef:string, state:string, anchoredAt:int, revokedAt:int, anchoredBlock:int}>|null */
     private ?array $consentRecords = null;
+    /** @var array{cells:int, active:int, withdrawn:int, pending:int, unreadable:int}|null */
+    private ?array $consentCounts = null;
     /** Set when the bundle names a registry this SDK does not read: the anchors are then never verified. */
     private bool $registryRefused = false;
 
@@ -224,6 +227,7 @@ final class ReceiptVerifier
         $this->namedRegistry = null;
         $this->documentRecord = null;
         $this->consentRecords = null;
+        $this->consentCounts = null;
         $this->registryRefused = false;
         if (is_string($input)) {
             $decoded = self::decodeJson($input);
@@ -279,6 +283,10 @@ final class ReceiptVerifier
         if (!is_string($merkleRoot) || $merkleRoot === '') {
             throw new MalformedInput('the bundle carries a passkey receipt but no merkleRoot string');
         }
+        $outside = self::passkeyFieldOutsideFormat($r);
+        if ($outside !== null) {
+            throw new MalformedInput($outside);
+        }
         return $this->verifyPasskeyBundle($r, $bundle, $offer, $merkleRoot, $notes);
     }
 
@@ -305,7 +313,8 @@ final class ReceiptVerifier
         $cellLabelBinding = self::assessRecordedCellLabels($companySignature, $notes);
         $disclosureCopy = $this->verifyRecordedDisclosureCopy($r, $notes);
         $documentAnchor = $this->verifyDocumentAnchor($r, $notes);
-        $notes[] = 'consentAnchor skipped: a recorded receipt carries no consentRef to read on chain.';
+        $notes[] = "consentAnchor skipped: this verifier reads a consent's on-chain record from a passkey bundle only, so the "
+            . 'withdrawal of a paper or telephone consent is not checked.';
 
         if ($companySignature === 'fail' || $receiptIntegrity === 'fail' || $disclosureCopy === 'fail' || $documentAnchor === 'fail') {
             $overall = 'failed';
@@ -327,9 +336,12 @@ final class ReceiptVerifier
             consentAnchor: 'skipped',
             cellLabelBinding: $cellLabelBinding,
             overall: $overall,
+            withdrawal: 'not_checked',
             notes: $notes,
             documentAnchorRecord: $this->documentRecord,
             consentAnchorRecords: $this->consentRecords,
+            consentAnchorCounts: $this->consentCounts,
+            registryRefused: $this->registryRefused,
         );
     }
 
@@ -375,9 +387,12 @@ final class ReceiptVerifier
             consentAnchor: 'skipped',
             cellLabelBinding: 'unsupported',
             overall: $overall,
+            withdrawal: 'not_checked',
             notes: $notes,
             documentAnchorRecord: $this->documentRecord,
             consentAnchorRecords: $this->consentRecords,
+            consentAnchorCounts: $this->consentCounts,
+            registryRefused: $this->registryRefused,
         );
     }
 
@@ -441,7 +456,8 @@ final class ReceiptVerifier
 
         $disclosureCopy = $this->verifyOfferDisclosureCopy($offer, $companySignature, $notes);
         $documentAnchor = $this->verifyDocumentAnchor($r, $notes);
-        $consentAnchor = $this->verifyConsentAnchor($bundle, $merkleRoot, $citizenAssertion, $notes);
+        $consentAnchor = $this->verifyConsentAnchor($r, $bundle, $merkleRoot, $citizenAssertion, $notes);
+        $withdrawal = $this->withdrawalOf($consentAnchor);
 
         $checks = [$companySignature, $receiptIntegrity, $citizenAssertion, $disclosureCopy, $documentAnchor, $consentAnchor];
         if (in_array('fail', $checks, true)) {
@@ -464,9 +480,13 @@ final class ReceiptVerifier
             consentAnchor: $consentAnchor,
             cellLabelBinding: $cellLabelBinding,
             overall: $overall,
+            withdrawal: $withdrawal['withdrawal'],
             notes: $notes,
+            withdrawnAt: $withdrawal['withdrawnAt'],
             documentAnchorRecord: $this->documentRecord,
             consentAnchorRecords: $this->consentRecords,
+            consentAnchorCounts: $this->consentCounts,
+            registryRefused: $this->registryRefused,
         );
     }
 
@@ -829,11 +849,14 @@ final class ReceiptVerifier
      * OPT-IN (rpcUrl), BUNDLE ONLY: eth_call registry(consentRef) for each cell's consentRef. The record is tied to
      * this receipt only through the Merkle root, which is trusted only once the passkey assertion is bound to it.
      * A withdrawn cell (state 2) is never a pass: the consent is no longer in force, however authentic.
+     * TRAP: the ref list is signed by no one, so a file can drop a withdrawn ref. Every accepted cell the receipt lists
+     * counts, and one with no ref is unreadable: a floor, since the items are not proven exhaustive either.
      *
+     * @param array<array-key,mixed> $r
      * @param array<array-key,mixed> $bundle
      * @param list<string> $notes
      */
-    private function verifyConsentAnchor(array $bundle, string $merkleRoot, string $citizenAssertion, array &$notes): string
+    private function verifyConsentAnchor(array $r, array $bundle, string $merkleRoot, string $citizenAssertion, array &$notes): string
     {
         $rpcUrl = self::asString($this->opts['rpcUrl'] ?? null);
         if ($rpcUrl === '') {
@@ -860,10 +883,11 @@ final class ReceiptVerifier
         $root = strtolower(self::stripHex($merkleRoot));
         $selector = substr(Keccak::hashHex('registry(bytes32)'), 0, 10);
         $records = [];
+        $cells = max(count($refs), self::acceptedCellCount($r));
         $active = 0;
         $withdrawn = 0;
         $pending = 0;
-        $unread = 0;
+        $unread = $cells - count($refs);
         $foreign = [];
         foreach ($refs as $ref) {
             $call = $this->rpc($rpcUrl, 'eth_call', [['to' => $target['address'], 'data' => $selector . self::stripHex($ref)], 'latest']);
@@ -896,8 +920,8 @@ final class ReceiptVerifier
                 . "bundle's, so the bundle's chain reference does not belong to this receipt.";
             return 'fail';
         }
-        $total = count($refs);
-        $counts = "{$total} cell(s): {$active} active, {$withdrawn} withdrawn, {$pending} not anchored yet, {$unread} unreadable";
+        $counts = "{$cells} cell(s): {$active} active, {$withdrawn} withdrawn, {$pending} not anchored yet, {$unread} unreadable";
+        $this->consentCounts = ['cells' => $cells, 'active' => $active, 'withdrawn' => $withdrawn, 'pending' => $pending, 'unreadable' => $unread];
         $blocks = implode(', ', array_values(array_unique(array_column($records, 'anchoredBlock'))));
         if ($withdrawn > 0) {
             $notes[] = "consentAnchor WITHDRAWN on chainId {$chainId} ({$counts}). The chain records the consent under "
@@ -905,9 +929,14 @@ final class ReceiptVerifier
                 . 'it is no longer in force. This is NOT a forgery.';
             return 'withdrawn';
         }
-        if ($active !== $total) {
-            $notes[] = "consentAnchor UNAVAILABLE on chainId {$chainId} ({$counts}). Anchoring is asynchronous and an RPC can "
-                . 'fail: this is NOT a contradiction.';
+        if ($active !== $cells) {
+            $named = count($refs);
+            $unnamed = $cells > $named
+                ? " The bundle names a consentRef for {$named} of the receipt's {$cells} accepted cells, and "
+                    . 'no one signs that list: an unnamed cell counts as unreadable.'
+                : '';
+            $notes[] = "consentAnchor UNAVAILABLE on chainId {$chainId} ({$counts}).{$unnamed} Anchoring is asynchronous and an "
+                . 'RPC can fail: this is NOT a contradiction.';
             return 'unavailable';
         }
         $notes[] = "Consent anchor FOUND on chainId {$chainId} under this bundle's Merkle root ({$counts}), anchored in "
@@ -1613,11 +1642,6 @@ final class ReceiptVerifier
      */
     private function integrityFailure(array $r, array $offer): ?string
     {
-        foreach (array_keys($r) as $k) {
-            if (!in_array((string) $k, self::PASSKEY_RECEIPT_KEYS, true)) {
-                return "the receipt carries a top-level field outside the receipt format ({$k})";
-            }
-        }
         if (!$this->canonEqual($r['type'] ?? null, self::PASSKEY_RECEIPT_TYPE)) {
             return 'the receipt type is not a passkey ConsentReceipt';
         }
@@ -1627,18 +1651,7 @@ final class ReceiptVerifier
         if (!is_string($r['id'] ?? null) || !str_starts_with($r['id'], 'urn:agreely:receipt:')) {
             return 'the receipt id is not an urn:agreely:receipt identifier';
         }
-        $subject = self::asObject($r['credentialSubject'] ?? null);
-        foreach (array_keys($subject) as $k) {
-            if ($k !== 'id' && $k !== 'consent') {
-                return "credentialSubject carries a field the offer does not account for ({$k})";
-            }
-        }
-        $consent = self::asObject($subject['consent'] ?? null);
-        foreach (array_keys($consent) as $k) {
-            if (!in_array((string) $k, self::ALLOWED_CONSENT_KEYS, true)) {
-                return "the consent carries a field the offer does not account for ({$k})";
-            }
-        }
+        $consent = self::asObject(self::asObject($r['credentialSubject'] ?? null)['consent'] ?? null);
         $offerConsent = self::asObject($offer['consent'] ?? null);
         if (($r['issuer'] ?? null) !== ($offer['issuer'] ?? null)) {
             return "the issuer differs from the signed offer's";
@@ -1914,6 +1927,65 @@ final class ReceiptVerifier
         return false;
     }
 
+    /**
+     * A field the issuer never writes on a passkey receipt (ConsentReceipt::build): the file is not one Agreely issued,
+     * so it is unreadable, never a tamper, as the web verifier's bundleShapeOf reads it.
+     *
+     * @param array<array-key,mixed> $r
+     */
+    private static function passkeyFieldOutsideFormat(array $r): ?string
+    {
+        foreach (array_keys($r) as $k) {
+            if (!in_array((string) $k, self::PASSKEY_RECEIPT_KEYS, true)) {
+                return "the passkey receipt carries a top-level field the issuer never writes ({$k})";
+            }
+        }
+        $subject = self::asObject($r['credentialSubject'] ?? null);
+        foreach (array_keys($subject) as $k) {
+            if ($k !== 'id' && $k !== 'consent') {
+                return "the passkey receipt's credentialSubject carries a field the issuer never writes ({$k})";
+            }
+        }
+        foreach (array_keys(self::asObject($subject['consent'] ?? null)) as $k) {
+            if (!in_array((string) $k, self::ALLOWED_CONSENT_KEYS, true)) {
+                return "the passkey receipt's consent carries a field the issuer never writes ({$k})";
+            }
+        }
+        return null;
+    }
+
+    /**
+     * Accepted cells the receipt lists: one consentRef each.
+     *
+     * @param array<array-key,mixed> $r
+     */
+    private static function acceptedCellCount(array $r): int
+    {
+        return count(self::asArray(self::asObject(self::asObject($r['credentialSubject'] ?? null)['consent'] ?? null)['items'] ?? null));
+    }
+
+    /**
+     * What the consent anchor read says about the consent being in force. Only a complete read says "active".
+     *
+     * @return array{withdrawal:string, withdrawnAt:?int}
+     */
+    private function withdrawalOf(string $consentAnchor): array
+    {
+        if ($consentAnchor === 'pass') {
+            return ['withdrawal' => 'active', 'withdrawnAt' => null];
+        }
+        if ($consentAnchor !== 'withdrawn') {
+            return ['withdrawal' => 'not_checked', 'withdrawnAt' => null];
+        }
+        $latest = 0;
+        foreach ($this->consentRecords ?? [] as $rec) {
+            if ($rec['state'] === 'withdrawn' && $rec['revokedAt'] > $latest) {
+                $latest = $rec['revokedAt'];
+            }
+        }
+        return ['withdrawal' => 'withdrawn', 'withdrawnAt' => $latest > 0 ? $latest : null];
+    }
+
     /** Every check "skipped": none ran. receiptType is read from the receipt's own type, a best guess. */
     private static function malformedResult(string $input, string $type, string $reason): ReceiptVerification
     {
@@ -1928,6 +2000,7 @@ final class ReceiptVerifier
             consentAnchor: 'skipped',
             cellLabelBinding: 'skipped',
             overall: 'malformed',
+            withdrawal: 'not_checked',
             notes: [
                 "MALFORMED: {$reason}. No check ran: this is a file this verifier cannot read, not evidence that it was "
                     . 'altered. A file Agreely issued is a version "1" bundle or a receipt object.',
