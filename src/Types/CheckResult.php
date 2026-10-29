@@ -31,7 +31,8 @@ namespace Agreely\Sdk\Types;
  *                The HOST decides what each tier may unlock
  *   validUntil -> the end of the consent backing the answer, an ISO 8601 UTC instant
  *                ("2027-10-09T03:59:59Z"), on every status backed by a consent
- *                record (revoked, expired and relationship_ended included). Null when
+ *                record (revoked, expired, relationship_ended, purpose_ended and
+ *                guardian_consent_missing included). Null when
  *                there is no consent record to date (none, necessity, the named
  *                refusals: the key is absent from the wire), on an acknowledged
  *                informed line, on a legacy consent recorded with no end, and on a

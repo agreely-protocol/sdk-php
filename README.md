@@ -44,7 +44,7 @@ if ($agreely->check('cust_8812', 'Phone number', 'Billing')) {
 ```php
 $d = $agreely->checkDetailed('cust_8812', 'Phone number', 'Billing');
 // $d->decision   "allow" | "deny"   (ALLOW is the only true)
-// $d->status     one of the nine values below (Agreely\Sdk\Types\CheckStatus)
+// $d->status     one of the ten values below (Agreely\Sdk\Types\CheckStatus)
 // $d->consentRef "0x…"  (null for "none" and for "necessity")
 // $d->assurance  "citizen_signed" | "company_attested" | "company_documented"
 //                (null for "none"/"necessity" and for an acknowledged informed line)
@@ -58,8 +58,8 @@ $d = $agreely->checkDetailed('cust_8812', 'Phone number', 'Billing');
 A consent **deny is a normal 200** - `checkDetailed` returns it, it does not
 throw. Errors (auth, validation, rate-limit, outage) throw typed errors.
 
-`validUntil` is on every answer backed by a consent record (`revoked`, `expired` and
-`relationship_ended` included) and null when there is none (`none`, `necessity`, the
+`validUntil` is on every answer backed by a consent record (`revoked`, `expired`,
+`relationship_ended`, `purpose_ended` and `guardian_consent_missing` included) and null when there is none (`none`, `necessity`, the
 named refusals). It is an **upper bound, never a cache lease**: a withdrawal ends the
 consent before that date and reaches only a host that checks again, and a renewal moves
 it. Read it on every check; never cache an allow until it.
@@ -84,7 +84,7 @@ $who->company?->publicPolicyUrl; // the absolute url of the public privacy page,
 
 ### The status vocabulary
 
-Two statuses allow, seven deny:
+Two statuses allow, eight deny:
 
 | status | decision | what it means |
 | --- | --- | --- |
@@ -94,9 +94,11 @@ Two statuses allow, seven deny:
 | `revoked` | deny | the consent was withdrawn (art. 14) |
 | `expired` | deny | the consent lifespan elapsed (art. 14 al. 3) |
 | `relationship_ended` | deny | the company attested the purposes are accomplished (art. 23). A relationship-level stop: the per-cell consent stays truthfully active, it was never withdrawn. |
+| `purpose_ended` | deny | the company declared it no longer pursues this purpose (a cell a later consent document removed), and this consent was given at or before that declaration. Carries `consentRef`, `assurance`, `tier` and `validUntil`. The consent was never withdrawn. |
+| `guardian_consent_missing` | deny | the recorded consent concerns a minor under 14 and does not carry the consent of the person having parental authority or of the tutor, so it is without effect. Carries `consentRef`, `assurance`, `tier` and `validUntil`. A lapsed one answers `expired`, a withdrawn one `revoked`. |
 | `requires_depersonalization` | deny | the cell declares a ground the act carries only for depersonalized information (A-2.1 art. 65.1 al. 2 (4°)). Not "no consent on record": never answer it by collecting a consent. |
 | `basis_not_in_regime` | deny | the cell declares a ground the tenant's act does not carry (typically the other sector's vocabulary). The fix is a catalog re-declaration. |
-| `erased` | deny | listed by `openapi.yaml`, **not currently emitted**. Erasure crypto-shreds the record, so an erased cell reads back as `none`. |
+| `erased` | deny | **never sent**, and not in `openapi.yaml` nor in `CheckStatus::ALL`. Erasure crypto-shreds the record, so an erased cell reads back as `none`. The constant stays. |
 
 **A `necessity` allow is not a consent.** It rests on a basis the company
 *declared* on its catalog (`contract`, `necessary_for_service`, `security_fraud`,

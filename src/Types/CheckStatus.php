@@ -5,7 +5,7 @@ declare(strict_types=1);
 namespace Agreely\Sdk\Types;
 
 /**
- * The resolved status of an enforcement cell: the NINE-value vocabulary of
+ * The resolved status of an enforcement cell: the TEN-value vocabulary of
  * openapi.yaml CheckDecision.status / BatchDecision.status. The PHP twin of the TS
  * SDK's `Status` union.
  *
@@ -33,14 +33,24 @@ namespace Agreely\Sdk\Types;
  *   is withdrawn it denies REVOKED with a consentRef and still no assurance/tier.
  *   REVOKED   the consent was withdrawn (art. 14).
  *   EXPIRED   the consent lifespan elapsed (art. 14 al. 3).
- *   ERASED    listed by openapi.yaml, but NOT currently emitted by the API. Erasure
- *             is a crypto-shred: it DELETES the enforcement record outright (art. 23),
- *             so an erased cell reads back as deny/"none", not deny/"erased". Handle
- *             it if you switch exhaustively, but do not expect it on the wire today.
  *   RELATIONSHIP_ENDED
  *             the company attested the relationship is over (art. 23): a prospective,
  *             relationship-level stop. The per-cell consent stays truthfully active
  *             (it was never withdrawn), which is why this is its own status.
+ *   PURPOSE_ENDED
+ *             the company declared that it no longer pursues this purpose (a cell a
+ *             later consent document removed), and this consent was given at or before
+ *             that declaration; one given strictly after it answers on its own state.
+ *             Carries consentRef, assurance, tier and validUntil, as RELATIONSHIP_ENDED
+ *             does. The consent was never withdrawn and is not reported as withdrawn.
+ *   GUARDIAN_CONSENT_MISSING
+ *             the recorded consent concerns a minor under 14 years of age and does not
+ *             carry the consent of the person having parental authority or of the
+ *             tutor, so it is without effect. Carries consentRef, assurance, tier and
+ *             validUntil: the record exists and stays on file as it was recorded. A
+ *             lapsed one answers EXPIRED and a withdrawn one REVOKED; this status comes
+ *             before PURPOSE_ENDED and RELATIONSHIP_ENDED. A minor of 14 and over is
+ *             never refused on this ground.
  *   REQUIRES_DEPERSONALIZATION
  *             the cell declares a ground the tenant's act carries ONLY for
  *             depersonalized information (A-2.1 art. 65.1 al. 2 (4 deg)), which cannot
@@ -50,6 +60,10 @@ namespace Agreely\Sdk\Types;
  *             the cell declares a ground the tenant's act does not carry at all
  *             (typically left in the other sector's vocabulary). The fix is a catalog
  *             re-declaration by the tenant.
+ *
+ * ERASED is NOT in openapi.yaml and the API never sends it, so it is not in ALL. Erasure
+ * is a crypto-shred: it DELETES the enforcement record outright (art. 23), so an erased
+ * cell reads back as deny/"none". The constant stays for code that already names it.
  *
  * "sensitive_requires_consent" is NO LONGER EMITTED (since 2026-09-28) and the
  * constant was removed in 0.4.0: a sensitive cell now answers by its declared basis.
@@ -66,6 +80,8 @@ final class CheckStatus
     public const EXPIRED                    = 'expired';
     public const ERASED                     = 'erased';
     public const RELATIONSHIP_ENDED         = 'relationship_ended';
+    public const PURPOSE_ENDED              = 'purpose_ended';
+    public const GUARDIAN_CONSENT_MISSING   = 'guardian_consent_missing';
     public const REQUIRES_DEPERSONALIZATION = 'requires_depersonalization';
     public const BASIS_NOT_IN_REGIME        = 'basis_not_in_regime';
 
@@ -76,8 +92,9 @@ final class CheckStatus
         self::NONE,
         self::REVOKED,
         self::EXPIRED,
-        self::ERASED,
         self::RELATIONSHIP_ENDED,
+        self::PURPOSE_ENDED,
+        self::GUARDIAN_CONSENT_MISSING,
         self::REQUIRES_DEPERSONALIZATION,
         self::BASIS_NOT_IN_REGIME,
     ];

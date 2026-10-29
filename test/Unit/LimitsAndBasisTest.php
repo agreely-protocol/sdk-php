@@ -207,8 +207,9 @@ final class LimitsAndBasisTest extends TestCase
     }
 
     /**
-     * The status vocabulary must match openapi.yaml exactly: nine values, and the two
-     * that allow are exactly "active" and "necessity".
+     * The status vocabulary is the CheckDecision.status enum of openapi.yaml, copied here as a
+     * literal in spec order: ten values, and the two that allow are exactly "active" and
+     * "necessity". "erased" is not in it: the API never sends it.
      */
     public function testStatusVocabularyMatchesTheSpec(): void
     {
@@ -218,11 +219,13 @@ final class LimitsAndBasisTest extends TestCase
             'none',
             'revoked',
             'expired',
-            'erased',
             'relationship_ended',
+            'purpose_ended',
+            'guardian_consent_missing',
             'requires_depersonalization',
             'basis_not_in_regime',
         ], CheckStatus::ALL);
+        $this->assertNotContains(CheckStatus::ERASED, CheckStatus::ALL);
         $this->assertSame(['active', 'necessity'], CheckStatus::ALLOWING);
         $this->assertSame([
             'contract',
