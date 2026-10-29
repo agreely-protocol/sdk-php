@@ -5,11 +5,18 @@ declare(strict_types=1);
 namespace Agreely\Sdk\Test\Support;
 
 /**
- * Shared by the anchor tests: the readable Base Sepolia registry, a bundle re-pointed at it, and the eth_call
- * answers of registry(bytes32) and rootOf(bytes32).
+ * Shared by the anchor and key tests: the readable Base Sepolia and Base mainnet registries, a bundle re-pointed at
+ * Sepolia, the eth_call answers of the registry reads, and a JSON-RPC endpoint answering each read by its selector.
  */
 final class RegistryAnswers
 {
+    /** Consent anchor times a little after each bundle's grantedAt: an earlier anchor would read the consent as granted after it. */
+    public const A1V1_ANCHORED_AT = 1792862400;
+    public const CIDV1_ANCHORED_AT = 1792545900;
+
+    /** keccak256("AnchorBatch(bytes32,uint256,uint64)"). */
+    public const ANCHOR_BATCH_TOPIC = '0x5254c3f989f0bd166934c5b72923f9347ff20239737b8787c1821858809de984';
+
     /** The AgreelyRegistry the SDK reads by default on Base Sepolia (84532), EIP-55 checksummed. */
     public const SEPOLIA_REGISTRY = '0xf25D3F8E73648C797Be2CCCD428061f357567b9A';
 
@@ -59,6 +66,82 @@ final class RegistryAnswers
     {
         return '0x' . self::word($tag) . self::word($lane === 0 ? 0 : $anchoredAt) . self::word($lane === 0 ? 0 : $anchoredBlock)
             . self::word($lane);
+    }
+
+    /** keyOf(bytes32) and companyKeyOf(bytes32,bytes32): validFrom, anchoredAt, retiredAt, voidedAt. */
+    public static function keyWord(int $validFrom, int $anchoredAt, int $retiredAt = 0, int $voidedAt = 0): string
+    {
+        return '0x' . self::word($validFrom) . self::word($anchoredAt) . self::word($retiredAt) . self::word($voidedAt);
+    }
+
+    /** A key window, valid and recorded from 2026-10-20, in force for every receipt in vectors/receipts. */
+    public static function keyInForce(): string
+    {
+        return self::keyWord(1792500000, 1792500060);
+    }
+
+    /**
+     * A citizenKeySalt, a top-level member no signature covers, so a vector bundle can carry one.
+     *
+     * @param array<string,mixed> $bundle
+     * @return array<string,mixed>
+     */
+    public static function salted(array $bundle): array
+    {
+        $bundle['citizenKeySalt'] = '0x' . str_repeat('5a', 32);
+        return $bundle;
+    }
+
+    /**
+     * The AnchorBatch(merkleRoot, refCount, timestamp) log the anchoring transaction emitted.
+     *
+     * @return array{address:string, topics:list<string>, data:string, blockNumber:string, removed:bool}
+     */
+    public static function anchorBatchLog(string $root, int $refCount, int $block = 53000000, ?string $address = null): array
+    {
+        return [
+            'address' => $address ?? strtolower(self::SEPOLIA_REGISTRY),
+            'topics' => [self::ANCHOR_BATCH_TOPIC, '0x' . strtolower((string) preg_replace('/^0x/', '', $root))],
+            'data' => '0x' . self::word($refCount) . self::word(0),
+            'blockNumber' => '0x' . dechex($block),
+            'removed' => false,
+        ];
+    }
+
+    /**
+     * A JSON-RPC endpoint answering each eth_call by its selector and eth_getLogs with `logs` (see ChainStub).
+     *
+     * @param array<string,callable> $answers registry, rootOf, keyOf, companyKeyOf, getCompanyDid, logs
+     */
+    public static function chain(array $answers): ChainStub
+    {
+        return new ChainStub($answers);
+    }
+
+    /**
+     * A chain answering by selector from a vector case's answers (citizen-key-chain.json, recorded-v4.json,
+     * anchor-batch.json); an answer absent is a JSON-RPC error.
+     *
+     * @param array<string,mixed> $answers
+     */
+    public static function vectorChain(array $answers): ChainStub
+    {
+        $out = [];
+        $registry = $answers['registry'] ?? null;
+        if (is_array($registry)) {
+            $out['registry'] = static fn (string $ref): mixed => $registry[$ref] ?? null;
+        }
+        foreach (['keyOf', 'companyKeyOf', 'getCompanyDid'] as $read) {
+            if (array_key_exists($read, $answers)) {
+                $answer = $answers[$read];
+                $out[$read] = static fn (): mixed => $answer;
+            }
+        }
+        if (array_key_exists('anchorBatchLogs', $answers)) {
+            $logs = $answers['anchorBatchLogs'];
+            $out['logs'] = static fn (): mixed => $logs;
+        }
+        return new ChainStub($out);
     }
 
     private static function word(int $n): string

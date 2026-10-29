@@ -32,7 +32,7 @@ final class WithdrawalTest extends TestCase
     /** @return array<string,mixed> */
     private static function bundle(): array
     {
-        return RegistryAnswers::onReadableRegistry(self::artefact('a1v1.bundle'));
+        return RegistryAnswers::salted(RegistryAnswers::onReadableRegistry(self::artefact('a1v1.bundle')));
     }
 
     private static function root(): string
@@ -50,21 +50,28 @@ final class WithdrawalTest extends TestCase
     }
 
     /**
-     * Answers each eth_call registry(consentRef) with `$byRef(ref)`; null is a transport failure. `$asked` records the refs.
+     * Answers each registry(consentRef) with `$byRef(ref)` (null is a transport failure), both keys in force, and,
+     * unless `$anchorLog` is false, the AnchorBatch log of the bundle's root naming 3 refs. `$asked` records the refs.
      *
      * @param callable(string): ?string $byRef
      * @param list<string> $asked
      * @return array<string,mixed>
      */
-    private static function registry(callable $byRef, array &$asked): array
+    private static function registry(callable $byRef, array &$asked, bool $anchorLog = true): array
     {
-        return self::SEPOLIA + ['httpPost' => static function (string $url, string $body) use ($byRef, &$asked): ?string {
-            /** @var array{params:list<array{data:string}>} $req */
-            $req = json_decode($body, true);
-            $ref = '0x' . substr($req['params'][0]['data'], 10);
-            $asked[] = $ref;
-            $out = $byRef($ref);
-            return $out === null ? null : (string) json_encode(['jsonrpc' => '2.0', 'id' => 1, 'result' => $out]);
+        $answers = [
+            'registry' => static fn (string $ref): string|false => $byRef($ref) ?? false,
+            'keyOf' => static fn (): string => RegistryAnswers::keyInForce(),
+            'companyKeyOf' => static fn (): string => RegistryAnswers::keyInForce(),
+        ];
+        if ($anchorLog) {
+            $answers['logs'] = static fn (): array => [RegistryAnswers::anchorBatchLog(self::root(), 3)];
+        }
+        $chain = RegistryAnswers::chain($answers);
+        return self::SEPOLIA + ['httpPost' => static function (string $url, string $body) use ($chain, &$asked): ?string {
+            $out = $chain->post($url, $body);
+            $asked = $chain->refs;
+            return $out;
         }];
     }
 
@@ -84,7 +91,7 @@ final class WithdrawalTest extends TestCase
         $this->assertSame('pass', $result->consentAnchor);
         $this->assertSame('active', $result->withdrawal);
         $this->assertNull($result->withdrawnAt);
-        $this->assertSame(['cells' => 3, 'active' => 3, 'withdrawn' => 0, 'pending' => 0, 'unreadable' => 0], $result->consentAnchorCounts);
+        $this->assertSame(['cells' => 3, 'active' => 3, 'withdrawn' => 0, 'pending' => 0, 'unreadable' => 0, 'anchorBatchRefs' => 3], $result->consentAnchorCounts);
         $this->assertCount(3, $asked);
     }
 
@@ -135,7 +142,7 @@ final class WithdrawalTest extends TestCase
         $this->assertSame('verified', $result->overall);
         $this->assertSame('not_checked', $result->withdrawal);
         $this->assertSame([], $asked);
-        $this->assertStringContainsString('the withdrawal of a paper or telephone consent is not checked', implode("\n", $result->notes));
+        $this->assertStringContainsString('signs no anchor before version 4, so the withdrawal of this consent is not checked', implode("\n", $result->notes));
     }
 
     public function testABarePasskeyReceiptAndAMalformedFileLeaveTheWithdrawalNotChecked(): void
@@ -155,11 +162,31 @@ final class WithdrawalTest extends TestCase
         $answer = static fn (string $ref): string => $ref === $dropped
             ? RegistryAnswers::anchorWord(self::root(), 1792862400, 1793100000, 2)
             : RegistryAnswers::anchorWord(self::root(), 1792862400);
-        $result = self::verify($doctored, self::registry($answer, $asked));
+        $result = self::verify($doctored, self::registry($answer, $asked, false));
         $this->assertNotContains($dropped, $asked);
         $this->assertSame('unavailable', $result->consentAnchor);
         $this->assertSame(['cells' => 3, 'active' => 2, 'withdrawn' => 0, 'pending' => 0, 'unreadable' => 1], $result->consentAnchorCounts);
         $this->assertSame('not_checked', $result->withdrawal);
         $this->assertStringContainsString("names a consentRef for 2 of the receipt's 3 accepted cells", implode("\n", $result->notes));
+    }
+
+    public function testTheAnchorsOwnLogCountsTheRefsItWroteAndAnUnnamedOneIsUnreadableNeverInForce(): void
+    {
+        [$kept1, $kept2, $dropped] = self::refs();
+        $doctored = self::bundle();
+        $doctored['consentRefs'] = [$kept1, $kept2];
+        $asked = [];
+        $answer = static fn (string $ref): string => $ref === $dropped
+            ? RegistryAnswers::anchorWord(self::root(), 1792862400, 1793100000, 2)
+            : RegistryAnswers::anchorWord(self::root(), 1792862400);
+        $result = self::verify($doctored, self::registry($answer, $asked));
+        $this->assertSame('pass', $result->citizenAssertion);
+        $this->assertSame('unavailable', $result->consentAnchor);
+        $this->assertSame(
+            ['cells' => 3, 'active' => 2, 'withdrawn' => 0, 'pending' => 0, 'unreadable' => 1, 'anchorBatchRefs' => 3],
+            $result->consentAnchorCounts,
+        );
+        $this->assertSame('not_checked', $result->withdrawal);
+        $this->assertStringContainsString("The consent's anchor wrote 3 refs and the bundle names 2", implode("\n", $result->notes));
     }
 }

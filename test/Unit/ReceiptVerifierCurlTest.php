@@ -16,6 +16,8 @@ use PHPUnit\Framework\TestCase;
  */
 final class ReceiptVerifierCurlTest extends TestCase
 {
+    private const BLOCK = 50179548;
+
     /** @var resource|null */
     private $server = null;
     private string $dir = '';
@@ -26,7 +28,8 @@ final class ReceiptVerifierCurlTest extends TestCase
         $this->dir = sys_get_temp_dir() . '/agreely-sdk-rpc-' . bin2hex(random_bytes(6));
         mkdir($this->dir);
         $log = $this->dir . '/requests.log';
-        // Answers registry(consentRef) with the root the request path names, and hangs on /hang.
+        // Answers registry(consentRef) with the root the request path names and its AnchorBatch log, both keys in force,
+        // and hangs on /hang.
         file_put_contents($this->dir . '/router.php', '<?php
 $body = (string) file_get_contents("php://input");
 file_put_contents(' . var_export($log, true) . ', $body . "\n", FILE_APPEND);
@@ -36,8 +39,14 @@ $req = json_decode($body, true);
 $method = is_array($req) ? ($req["method"] ?? "") : "";
 $word = fn (int $n): string => str_pad(dechex($n), 64, "0", STR_PAD_LEFT);
 $root = substr($path, 1);
-$result = match ($method) {
-    "eth_call" => "0x" . $root . $word(1760000000) . $word(0) . $word(1) . $word(50179548),
+$selector = substr((string) ($req["params"][0]["data"] ?? ""), 0, 10);
+$log = ' . var_export(RegistryAnswers::anchorBatchLog('0x' . str_repeat('0', 64), 3, self::BLOCK), true) . ';
+$log["topics"][1] = "0x" . $root;
+$result = match (true) {
+    $method === "eth_getLogs" => [$log],
+    $method === "eth_call" && $selector === "0x7ef50298" => "0x" . $root . $word(' . RegistryAnswers::A1V1_ANCHORED_AT . ')
+        . $word(0) . $word(1) . $word(' . self::BLOCK . '),
+    $method === "eth_call" => ' . var_export(RegistryAnswers::keyInForce(), true) . ',
     default => null,
 };
 header("Content-Type: application/json");
@@ -90,7 +99,7 @@ echo $method === "" ? "{\"jsonrpc\":\"2.0\",\"id\":1,\"error\":{\"code\":-32600,
         $docs = json_decode((string) file_get_contents(dirname(__DIR__, 2) . '/vectors/receipts/did-documents.json'), true);
         /** @var array<string,mixed> $bundle */
         $bundle = json_decode((string) file_get_contents(dirname(__DIR__, 2) . '/vectors/receipts/a1v1.bundle.json'), true);
-        return Agreely::verifyReceipt(RegistryAnswers::onReadableRegistry($bundle), [
+        return Agreely::verifyReceipt(RegistryAnswers::salted(RegistryAnswers::onReadableRegistry($bundle)), [
             'resolver' => static fn (string $did): ?array => is_array($docs[$did] ?? null) ? $docs[$did] : null,
             'rpcUrl' => "http://127.0.0.1:{$this->port}/{$path}",
             'chainId' => 84532,
@@ -108,11 +117,16 @@ echo $method === "" ? "{\"jsonrpc\":\"2.0\",\"id\":1,\"error\":{\"code\":-32600,
     {
         $result = $this->verify(str_repeat('99', 32));
         $calls = $this->requests();
-        $this->assertNotSame([], $calls);
-        $this->assertSame('eth_call', $calls[0]['method'] ?? null);
-        /** @var list<array{data:string}> $params */
-        $params = $calls[0]['params'] ?? [];
-        $this->assertStringStartsWith('0x7ef50298', $params[0]['data']);
+        $selectors = array_map(static function (array $call): string {
+            $params = $call['params'] ?? null;
+            $first = is_array($params) ? $params[0] ?? null : null;
+            $data = is_array($first) ? $first['data'] ?? null : null;
+            $method = $call['method'] ?? null;
+            return (is_string($method) ? $method : '') . ' ' . (is_string($data) ? substr($data, 0, 10) : '');
+        }, $calls);
+        // The person's key is read first, then every consent ref against the registry.
+        $this->assertSame('eth_call 0xdf78bce2', $selectors[0] ?? null);
+        $this->assertContains('eth_call 0x7ef50298', $selectors);
         $this->assertSame('fail', $result->consentAnchor);
         $this->assertSame('failed', $result->overall);
     }
@@ -124,7 +138,9 @@ echo $method === "" ? "{\"jsonrpc\":\"2.0\",\"id\":1,\"error\":{\"code\":-32600,
         $result = $this->verify(substr($bundle['merkleRoot'], 2));
         $this->assertSame('pass', $result->consentAnchor);
         $this->assertSame('verified', $result->overall);
-        $this->assertSame(50179548, $result->consentAnchorRecords[0]['anchoredBlock'] ?? null);
+        $this->assertSame(self::BLOCK, $result->consentAnchorRecords[0]['anchoredBlock'] ?? null);
+        $this->assertSame('pass', $result->companyKeyRegistry);
+        $this->assertSame(3, $result->consentAnchorCounts['anchorBatchRefs'] ?? null);
     }
 
     public function testAHangingRpcCannotHoldAVerificationPastTheDeadline(): void
@@ -134,7 +150,9 @@ echo $method === "" ? "{\"jsonrpc\":\"2.0\",\"id\":1,\"error\":{\"code\":-32600,
         $elapsedMs = intdiv(hrtime(true) - $started, 1_000_000);
         $this->assertLessThan(2500, $elapsedMs);
         $this->assertSame('unavailable', $result->consentAnchor);
-        $this->assertSame('verified', $result->overall);
+        $this->assertSame('unavailable', $result->companyKeyRegistry);
+        // A company key the registry did not confirm is never verified (the web verifier's keyUnconfirmed).
+        $this->assertSame('unavailable', $result->overall);
         // The first call hangs to the deadline; every call after it is refused without a request.
         $this->assertCount(1, $this->requests());
     }

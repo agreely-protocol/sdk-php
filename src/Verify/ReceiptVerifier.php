@@ -95,7 +95,6 @@ final class ReceiptVerifier
      * assertion resolve to "unavailable" by default.
      */
     private const DEFAULT_CITIZEN_BASE = 'https://my.agreely.ca';
-    private const DEFAULT_IPFS_GATEWAY = 'https://gateway.lighthouse.storage/ipfs/';
     // The AgreelyRegistry each chain is read from, by eth_call. EIP-55 checksummed.
     //
     // KEEP THIS IN SYNC WITH THE DEPLOYMENTS. It is pinned BY HAND (the SDK reads no config), so a
@@ -175,10 +174,23 @@ final class ReceiptVerifier
     private ?array $documentRecord = null;
     /** @var list<array{consentRef:string, state:string, anchoredAt:int, revokedAt:int, anchoredBlock:int}>|null */
     private ?array $consentRecords = null;
-    /** @var array{cells:int, active:int, withdrawn:int, pending:int, unreadable:int}|null */
+    /** @var array{cells:int, active:int, withdrawn:int, pending:int, unreadable:int, anchorBatchRefs?:int}|null */
     private ?array $consentCounts = null;
     /** Set when the bundle names a registry this SDK does not read: the anchors are then never verified. */
     private bool $registryRefused = false;
+    /**
+     * The company key that verified proof[0], and the DID document it was resolved from.
+     *
+     * @var array{key:string, doc:array<array-key,mixed>}|null
+     */
+    private ?array $signer = null;
+    /**
+     * The consent anchor under the trusted root: its earliest and latest anchor times, when a cell matched it.
+     *
+     * @var array{earliest:int, latest:int}|null
+     */
+    private ?array $consentTiming = null;
+    private ?string $disclosureGateway = null;
 
     /** @param array<string,mixed> $opts */
     public function __construct(private readonly array $opts = [])
@@ -229,6 +241,9 @@ final class ReceiptVerifier
         $this->consentRecords = null;
         $this->consentCounts = null;
         $this->registryRefused = false;
+        $this->signer = null;
+        $this->consentTiming = null;
+        $this->disclosureGateway = null;
         if (is_string($input)) {
             $decoded = self::decodeJson($input);
             if ($decoded === null) {
@@ -270,7 +285,7 @@ final class ReceiptVerifier
         }
 
         if ($type !== 'citizen') {
-            return $this->verifyRecorded($r, $type, $bundle !== null, $notes);
+            return $this->verifyRecorded($r, $type, $bundle, $notes);
         }
         if ($bundle === null) {
             return $this->verifyBarePasskey($r, $notes);
@@ -294,55 +309,148 @@ final class ReceiptVerifier
      * A paper (company_attested) or telephone (company_documented) receipt: the company signed the body itself.
      *
      * @param array<array-key,mixed> $r
+     * @param 'company_attested'|'company_documented' $type
+     * @param array<array-key,mixed>|null $bundle
      * @param list<string> $notes
      */
-    private function verifyRecorded(array $r, string $type, bool $fromBundle, array $notes): ReceiptVerification
+    private function verifyRecorded(array $r, string $type, ?array $bundle, array $notes): ReceiptVerification
     {
+        // verify-core.js receiptModeOf: a version this verifier does not read is refused unread, never judged.
+        $shape = Recorded::shapeOf($r, $type);
+        if ($shape['kind'] === 'unknown-version') {
+            throw new MalformedInput("the receipt's receiptVersion {$shape['version']} is not a version this verifier reads");
+        }
         $companySignature = $this->verifyCompanySignature($r, $notes, $type);
         $notes[] = $type === 'company_attested'
             ? 'A company-attested receipt carries no citizen passkey assertion, so citizenAssertion is not applicable.'
             : 'A verbal (company-documented) receipt carries no citizen passkey assertion, so citizenAssertion is not applicable.';
         // The signature is taken over the receipt body itself, so it IS the integrity check, except for the proof's
-        // own members, which nothing signs.
+        // own members, which nothing signs, and a body its issuer never writes, which a valid signature does not make one.
         $proofFailure = self::recordedProofFailure($r);
         $receiptIntegrity = $companySignature;
         if ($proofFailure !== null) {
             $receiptIntegrity = 'fail';
             $notes[] = "Receipt integrity FAILED: {$proofFailure}.";
         }
+        if ($shape['kind'] === 'mismatch') {
+            $receiptIntegrity = 'fail';
+            $notes[] = "Receipt integrity FAILED: {$shape['reason']}, so it is not a receipt its issuer writes.";
+        }
         $cellLabelBinding = self::assessRecordedCellLabels($companySignature, $notes);
         $disclosureCopy = $this->verifyRecordedDisclosureCopy($r, $notes);
         $documentAnchor = $this->verifyDocumentAnchor($r, $notes);
-        $notes[] = "consentAnchor skipped: this verifier reads a consent's on-chain record from a passkey bundle only, so the "
-            . 'withdrawal of a paper or telephone consent is not checked.';
 
-        if ($companySignature === 'fail' || $receiptIntegrity === 'fail' || $disclosureCopy === 'fail' || $documentAnchor === 'fail') {
-            $overall = 'failed';
-        } elseif ($companySignature === 'unavailable' || $this->registryRefused) {
-            $overall = 'unavailable';
+        // The issuer is judged FIRST, on its own date: a signed anchor never bounds the instant its own signer chose.
+        $company = $this->rpcUrl() !== ''
+            ? $this->verifyCompanyKeyRegistry($r, ['anchoredAt' => null, 'issuerDatedOnly' => true], $companySignature, $notes)
+            : null;
+
+        $consentAnchor = 'skipped';
+        $signedAnchor = null;
+        $binding = $bundle !== null && $companySignature === 'pass' && $receiptIntegrity === 'pass'
+            ? Recorded::rootBinding($r, $bundle, self::collectConsentRefs($bundle))
+            : null;
+        if (($r['receiptVersion'] ?? null) !== '4') {
+            $notes[] = 'consentAnchor skipped: a paper or telephone receipt signs no anchor before version 4, so the withdrawal of '
+                . 'this consent is not checked.';
+        } elseif ($bundle === null) {
+            $notes[] = "consentAnchor skipped: a version 4 receipt's anchor is read with its verification bundle, which carries the "
+                . 'merkleRoot and consentRefs beside it.';
+        } elseif ($binding === null || $binding['binding'] === 'preV4') {
+            $notes[] = 'consentAnchor skipped: the company signature did not hold, so no signed anchor ties this receipt to the chain.';
         } else {
+            $signedAnchor = $binding;
+            $consentAnchor = $this->verifySignedAnchor($r, $binding, $company, $notes);
+        }
+        $withdrawal = $this->withdrawalOf($consentAnchor);
+
+        $decisive = [$companySignature, $receiptIntegrity, $disclosureCopy, $documentAnchor, $consentAnchor, $company['status'] ?? null];
+        if (in_array('fail', $decisive, true)) {
+            $overall = 'failed';
+        } elseif ($companySignature === 'unavailable' || $this->registryRefused || ($company !== null && $company['status'] !== 'pass')) {
+            $overall = 'unavailable';
+        } elseif ($type === 'company_documented') {
             // A telephone receipt is the organisation's word, authenticated: never more than partial.
-            $overall = $type === 'company_attested' ? 'verified' : 'partial';
+            $overall = 'partial';
+        } else {
+            $overall = $consentAnchor === 'withdrawn' ? 'withdrawn' : 'verified';
         }
 
         return new ReceiptVerification(
-            input: $fromBundle ? 'bundle' : 'receipt',
+            input: $bundle !== null ? 'bundle' : 'receipt',
             receiptType: $type,
             companySignature: $companySignature,
             receiptIntegrity: $receiptIntegrity,
             citizenAssertion: 'unsupported',
             disclosureCopy: $disclosureCopy,
             documentAnchor: $documentAnchor,
-            consentAnchor: 'skipped',
+            consentAnchor: $consentAnchor,
             cellLabelBinding: $cellLabelBinding,
             overall: $overall,
-            withdrawal: 'not_checked',
+            withdrawal: $withdrawal['withdrawal'],
             notes: $notes,
+            withdrawnAt: $withdrawal['withdrawnAt'],
             documentAnchorRecord: $this->documentRecord,
             consentAnchorRecords: $this->consentRecords,
             consentAnchorCounts: $this->consentCounts,
             registryRefused: $this->registryRefused,
+            disclosureGateway: $this->disclosureGateway,
+            companyKeyRegistry: $company['status'] ?? null,
+            companyKey: $company['reading'] ?? null,
+            signedAnchor: $signedAnchor,
         );
+    }
+
+    /**
+     * A version 4 recorded receipt's own anchor (ui.js consentChainRequest): a bundle that contradicts the signature
+     * fails with nothing read; a bound one is read on the SIGNED root and refs, and only once the registry confirms
+     * the company key that signed them. A matching anchor older than the signing instant is not this receipt's.
+     *
+     * @param array<array-key,mixed> $r
+     * @param array{binding:string, merkleRoot:string, consentRefs:list<string>} $binding
+     * @param array{status:string, reading?:array<string,mixed>}|null $company
+     * @param list<string> $notes
+     */
+    private function verifySignedAnchor(array $r, array $binding, ?array $company, array &$notes): string
+    {
+        if ($binding['binding'] === 'contradicts') {
+            $notes[] = "consentAnchor FAILED: the receipt signs its anchor batch, and the bundle's own merkleRoot or consentRefs "
+                . 'contradict it (another root, or a ref the signature does not carry). Nothing was read on chain.';
+            return 'fail';
+        }
+        if ($binding['binding'] === 'malformed') {
+            $notes[] = "consentAnchor skipped: the version 4 receipt's signed anchor is missing or malformed, or the bundle carries "
+                . 'no merkleRoot, so no anchor is tied to this receipt.';
+            return 'skipped';
+        }
+        if ($this->rpcUrl() === '') {
+            $notes[] = "consentAnchor skipped: pass an rpcUrl to read the consent's on-chain record.";
+            return 'skipped';
+        }
+        if ($company === null || ($company['reading']['verdict'] ?? null) !== 'authentic') {
+            $notes[] = "consentAnchor UNAVAILABLE: the receipt's anchor hangs on its company signature, and the registry did not "
+                . 'confirm the company key at the instant it signed, so the signed root is not trusted and nothing was read.';
+            return 'unavailable';
+        }
+        $status = $this->verifyConsentAnchor(
+            $binding['consentRefs'],
+            $binding['merkleRoot'],
+            null,
+            ['cells' => 0, 'countAnchoredRefs' => false],
+            $notes,
+        );
+        $signedAt = self::secondsOf(self::signingInstantOf($r));
+        $timing = $this->consentTiming;
+        if (
+            in_array($status, ['pass', 'withdrawn', 'unavailable'], true)
+            && $timing !== null && $signedAt !== null
+            && $timing['earliest'] + CitizenKeyChain::SKEW < $signedAt
+        ) {
+            $notes[] = "consentAnchor FAILED: the chain anchored this root at {$timing['earliest']}, before the receipt was "
+                . "signed: a version 4 receipt signs a root before it is anchored, so this anchor is not this receipt's.";
+            return 'fail';
+        }
+        return $status;
     }
 
     /**
@@ -456,14 +564,84 @@ final class ReceiptVerifier
 
         $disclosureCopy = $this->verifyOfferDisclosureCopy($offer, $companySignature, $notes);
         $documentAnchor = $this->verifyDocumentAnchor($r, $notes);
-        $consentAnchor = $this->verifyConsentAnchor($r, $bundle, $merkleRoot, $citizenAssertion, $notes);
+
+        // The person's key on chain first: a registry that voids it, or places grantedAt outside its window, leaves the
+        // bundle's root untrusted, whatever the DID document says (ui.js receiptRootTrusted).
+        $rpcUrl = $this->rpcUrl();
+        $keyChain = $rpcUrl !== '' && $citizenAssertion === 'pass' ? $this->readCitizenKeyChain($r, $bundle, $passkey['coseHex'] ?? '') : null;
+        $keyRefused = $keyChain !== null && ($keyChain['state'] === 'voided' || $keyChain['state'] === 'notInForce');
+        $untrusted = null;
+        if ($citizenAssertion !== 'pass') {
+            $untrusted = "consentAnchor skipped: the bundle's Merkle root is not bound by a verified passkey assertion, so no on-chain "
+                . 'record can be tied to this receipt.';
+        } elseif ($keyRefused) {
+            $untrusted = "consentAnchor skipped: the registry records the person's key as voided, or not in force at grantedAt, so "
+                . "the bundle's Merkle root is not trusted and no on-chain record can be tied to this receipt.";
+        }
+        $consentAnchor = $this->verifyConsentAnchor(
+            self::collectConsentRefs($bundle),
+            $merkleRoot,
+            $untrusted,
+            ['cells' => self::acceptedCellCount($r), 'countAnchoredRefs' => true],
+            $notes,
+        );
         $withdrawal = $this->withdrawalOf($consentAnchor);
 
-        $checks = [$companySignature, $receiptIntegrity, $citizenAssertion, $disclosureCopy, $documentAnchor, $consentAnchor];
+        // The company key at grantedAt, bounded by the latest anchor holding the trusted root (issuer.js receiptClockOf).
+        $timing = $this->consentTiming;
+        $clock = CompanyKey::receiptClockOf($timing !== null ? ['rootMatches' => true, 'anchoredAt' => $timing['latest']] : null);
+        $company = $rpcUrl !== '' ? $this->verifyCompanyKeyRegistry($r, $clock, $companySignature, $notes) : null;
+
+        $citizenKeyChain = null;
+        $citizenKey = null;
+        if ($rpcUrl !== '' && $keyChain === null) {
+            $citizenKeyChain = 'skipped';
+            $notes[] = "citizenKeyChain skipped: the person's assertion did not verify, so there is no key to look up on chain.";
+        } elseif ($keyChain !== null) {
+            $half = CitizenKeyChain::halfReading(
+                $keyChain['state'],
+                'confirmed',
+                $timing !== null ? ['rootMatches' => true, 'anchoredAt' => $timing['latest'], 'earliestAnchoredAt' => $timing['earliest']] : null,
+                $keyChain['G'],
+                $keyChain['keyOfRegistry'],
+            );
+            $withholds = $half['colour'] === 'amber' && in_array($half['reason'], CitizenKeyChain::CHAIN_WITHHOLDS, true);
+            $citizenKey = [
+                'chainState' => $keyChain['state'],
+                'colour' => $half['colour'],
+                'reason' => $half['reason'],
+                'keyOfRegistry' => $keyChain['keyOfRegistry'],
+                'withholds' => $withholds,
+            ];
+            if ($keyChain['fp'] !== '') {
+                $citizenKey['fingerprint'] = $keyChain['fp'];
+            }
+            if ($keyChain['record'] !== null) {
+                $citizenKey['record'] = $keyChain['record'];
+            }
+            $citizenKey['grantedAt'] = $keyChain['G'];
+            $citizenKey['now'] = $keyChain['now'];
+            $citizenKeyChain = match (true) {
+                $half['colour'] === 'green' => 'pass',
+                $half['colour'] === 'red' => 'fail',
+                $half['colour'] === 'neutral' && $keyChain['state'] === 'notLinked' => 'skipped',
+                default => 'unavailable',
+            };
+            $notes[] = CitizenKeyChain::note($keyChain['state'], $half['colour'], $half['reason'], $withholds);
+        }
+
+        $checks = [
+            $companySignature, $receiptIntegrity, $citizenAssertion, $disclosureCopy, $documentAnchor, $consentAnchor,
+            $citizenKeyChain, $company['status'] ?? null,
+        ];
         if (in_array('fail', $checks, true)) {
             $overall = 'failed';
-        } elseif ($companySignature === 'pass' && $receiptIntegrity === 'pass' && $citizenAssertion === 'pass' && !$this->registryRefused) {
-            // A bundle that names a registry this SDK does not read is never verified, however sound its signatures.
+        } elseif (
+            $companySignature === 'pass' && $receiptIntegrity === 'pass' && $citizenAssertion === 'pass' && !$this->registryRefused
+            && ($company === null || $company['status'] === 'pass') && ($citizenKey['withholds'] ?? false) !== true
+        ) {
+            // A bundle that names a registry this SDK does not read is never verified, however sound its signatures, and
+            // with an rpcUrl, neither is one whose company key the registry does not confirm or whose person's key it withholds.
             $overall = $consentAnchor === 'withdrawn' ? 'withdrawn' : 'verified';
         } else {
             $overall = 'unavailable';
@@ -487,7 +665,115 @@ final class ReceiptVerifier
             consentAnchorRecords: $this->consentRecords,
             consentAnchorCounts: $this->consentCounts,
             registryRefused: $this->registryRefused,
+            disclosureGateway: $this->disclosureGateway,
+            companyKeyRegistry: $company['status'] ?? null,
+            companyKey: $company['reading'] ?? null,
+            citizenKeyChain: $citizenKeyChain,
+            citizenKey: $citizenKey,
         );
+    }
+
+    /**
+     * The person's key on chain: one keyOf(fingerprint) on the registry this verifier reads. The salt is the bundle's
+     * top-level citizenKeySalt; nothing else in the file chooses what is read or where. Never throws.
+     *
+     * @param array<array-key,mixed> $r
+     * @param array<array-key,mixed> $bundle
+     * @return array{state:string, fp:string, record:array{validFrom:string, anchoredAt:string, retiredAt:string, voidedAt:string}|null, G:?int, now:int, keyOfRegistry:bool}
+     */
+    private function readCitizenKeyChain(array $r, array $bundle, string $coseHex): array
+    {
+        $subject = self::asObject($r['credentialSubject'] ?? null);
+        $g = CitizenKeyChain::grantedAtSeconds(self::asObject($subject['consent'] ?? null)['grantedAt'] ?? null);
+        $saltPresent = array_key_exists('citizenKeySalt', $bundle);
+        $saltField = $bundle['citizenKeySalt'] ?? null;
+        $now = $this->nowSeconds();
+        $target = $this->registryToRead();
+        $known = self::REGISTRY_BY_CHAIN[$this->chainId()] ?? null;
+        $keyOfRegistry = $target['ok'] && $known !== null && strtolower($target['address']) === strtolower($known);
+        $out = [
+            'state' => CitizenKeyChain::chainState($saltField, $saltPresent, null, false, $g),
+            'fp' => '',
+            'record' => null,
+            'G' => $g,
+            'now' => $now,
+            'keyOfRegistry' => $keyOfRegistry,
+        ];
+        $salt = CitizenKeyChain::parseSalt($saltField, $saltPresent);
+        if ($salt['status'] !== 'ok') {
+            return $out;
+        }
+        try {
+            $fp = CitizenKeyChain::fingerprint(self::asString($subject['id'] ?? null), $coseHex, $salt['salt']);
+        } catch (Throwable) {
+            return ['state' => 'unreadable'] + $out;
+        }
+        if (!$target['ok']) {
+            return ['state' => 'unreachable', 'fp' => $fp] + $out;
+        }
+        $call = $this->rpc($this->rpcUrl(), 'eth_call', [['to' => $target['address'], 'data' => CitizenKeyChain::keyOfCalldata($fp)], 'latest']);
+        $record = $call['ok'] ? CitizenKeyChain::decodeKeyRecord($call['result']) : null;
+        return [
+            'state' => CitizenKeyChain::chainState($saltField, $saltPresent, $record, !$call['ok'], $g, $now),
+            'fp' => $fp,
+            'record' => $record,
+        ] + $out;
+    }
+
+    /**
+     * The company key that verified proof[0], on the company's domain at the instant it signed: companyKeyOf for its
+     * window, getCompanyDid for the key the company holds today (issuer.js resolveIssuerAuthenticity). The domain and
+     * the key come from the RESOLVED issuer document, never from the bundle.
+     *
+     * @param array<array-key,mixed> $r
+     * @param array{anchoredAt:?int, issuerDatedOnly:bool} $clock
+     * @param list<string> $notes
+     * @return array{status:string, reading?:array<string,mixed>}
+     */
+    private function verifyCompanyKeyRegistry(array $r, array $clock, string $companySignature, array &$notes): array
+    {
+        $signer = $this->signer;
+        if ($companySignature !== 'pass' || $signer === null) {
+            $notes[] = 'companyKeyRegistry skipped: no company key verified the signature, so there is no key to look up on chain.';
+            return ['status' => 'skipped'];
+        }
+        $keyId = '0x' . hash('sha256', $signer['key']);
+        $signedAt = self::secondsOf(self::signingInstantOf($r));
+        $domain = CompanyKey::domainFromDoc($signer['doc']);
+        $base = ['keyId' => $keyId, 'signedAt' => $signedAt, 'boundedBy' => $clock['anchoredAt'], 'notYetEffective' => false];
+        if ($domain === null) {
+            $notes[] = 'companyKeyRegistry UNAVAILABLE: the issuer DID document names no company domain (alsoKnownAs), so the '
+                . 'company key cannot be looked up on chain.';
+            return ['status' => 'unavailable', 'reading' => ['verdict' => 'no-domain', 'domain' => '', 'domainHash' => ''] + $base];
+        }
+        $domainHash = CompanyKey::domainHashOf($domain);
+        $target = $this->registryToRead();
+        if (!$target['ok']) {
+            $notes[] = "companyKeyRegistry UNAVAILABLE: {$target['reason']}";
+            return ['status' => 'unavailable'];
+        }
+        $rpcUrl = $this->rpcUrl();
+        $keyCall = $this->rpc($rpcUrl, 'eth_call', [['to' => $target['address'], 'data' => CompanyKey::companyKeyOfCalldata($domainHash, $keyId)], 'latest']);
+        $didCall = $this->rpc($rpcUrl, 'eth_call', [['to' => $target['address'], 'data' => CompanyKey::getCompanyDidCalldata($domainHash)], 'latest']);
+        $record = $keyCall['ok'] ? CitizenKeyChain::decodeKeyRecord($keyCall['result']) : null;
+        if ($record === null) {
+            $why = $keyCall['ok'] ? 'the answer does not decode' : $keyCall['reason'];
+            $notes[] = "companyKeyRegistry UNAVAILABLE: the company key's window on {$domain} could not be read ({$why}). This is NOT a refusal.";
+            return ['status' => 'unavailable', 'reading' => ['verdict' => 'unreachable', 'domain' => $domain, 'domainHash' => $domainHash] + $base];
+        }
+        $pit = CompanyKey::verdict($record, $signedAt, $clock);
+        $did = $didCall['ok'] ? CompanyKey::decodeCompanyDid($didCall['result']) : null;
+        $reading = ['verdict' => $pit['verdict'], 'domain' => $domain, 'domainHash' => $domainHash] + $base;
+        $reading['notYetEffective'] = $pit['notYetEffective'];
+        if ($pit['window'] !== null) {
+            $reading['window'] = $pit['window'];
+        }
+        if ($did !== null) {
+            $reading['currentKeyId'] = $did['keyId'];
+            $reading['rotated'] = $pit['verdict'] === 'authentic' && strtolower($did['keyId']) !== $keyId;
+        }
+        $notes[] = CompanyKey::note($reading);
+        return ['status' => CompanyKey::statusOf($pit['verdict']), 'reading' => $reading];
     }
 
     /**
@@ -530,6 +816,7 @@ final class ReceiptVerifier
         ['key' => $key, 'vmId' => $vmId] = $resolved;
 
         if (Signature::verifyEd25519($key, $canonical, $signature)) {
+            $this->signer = ['key' => $key, 'doc' => $resolved['doc']];
             $notes[] = "Company signature verified against issuer DID {$issuer} (key {$vmId}).";
             if ($type === 'company_documented') {
                 $scriptVersion = self::asString(self::asObject($r['evidence'] ?? null)['scriptVersion'] ?? null);
@@ -587,6 +874,7 @@ final class ReceiptVerifier
         }
         ['key' => $key, 'vmId' => $vmId] = $resolved;
         if (Signature::verifyEd25519($key, $canonical, $signature)) {
+            $this->signer = ['key' => $key, 'doc' => $resolved['doc']];
             $notes[] = "Company signature over the signed offer verified against issuer DID {$issuer} (key {$vmId}).";
             return 'pass';
         }
@@ -600,7 +888,7 @@ final class ReceiptVerifier
      *
      * @param array<array-key,mixed> $r
      * @param list<string> $notes
-     * @return array{status:string, vm:string, challenge:string, standing:string}
+     * @return array{status:string, vm:string, challenge:string, standing:string, coseHex?:string}
      */
     private function verifyPasskeySignature(array $r, array &$notes): array
     {
@@ -623,8 +911,10 @@ final class ReceiptVerifier
                 . '(network/resolution failure or key not found). This is INCONCLUSIVE, NOT a signature mismatch.';
             return ['status' => 'unavailable', 'vm' => $vm, 'challenge' => $challenge, 'standing' => ''];
         }
-        if (!self::isPlainObject($doc) || ($doc['id'] ?? null) !== $citizenDid
-            || !isset($doc['verificationMethod']) || !is_array($doc['verificationMethod']) || !array_is_list($doc['verificationMethod'])) {
+        if (
+            !self::isPlainObject($doc) || ($doc['id'] ?? null) !== $citizenDid
+            || !isset($doc['verificationMethod']) || !is_array($doc['verificationMethod']) || !array_is_list($doc['verificationMethod'])
+        ) {
             $notes[] = "Citizen assertion UNVERIFIABLE: what the resolver answered for {$citizenDid} is not that identity's DID "
                 . 'document (another id, or no verificationMethod list). This is INCONCLUSIVE, NOT a signature mismatch.';
             return ['status' => 'unavailable', 'vm' => $vm, 'challenge' => $challenge, 'standing' => ''];
@@ -664,6 +954,7 @@ final class ReceiptVerifier
             'vm' => $key['vmId'],
             'challenge' => $challenge,
             'standing' => self::citizenKeyStanding($doc, $citizenDid, $coseHex, $grantedAt),
+            'coseHex' => $coseHex,
         ];
     }
 
@@ -736,51 +1027,72 @@ final class ReceiptVerifier
     }
 
     /**
-     * Fetch the IPFS body and compare sha256(JCS(preimage)) with `$disclosureHash`. `$basis` non-null = the v2 preimage.
+     * Fetch the IPFS document from the gateways in order and compare sha256(JCS(preimage)) with `$disclosureHash`.
+     * `$basis` non-null = the v2 preimage. Only bytes that re-encode to the CID are the document: a hash mismatch on
+     * them fails, and anything a gateway sends that is not the CID's file moves to the next gateway.
      *
      * @param list<string> $notes
      */
     private function compareDisclosureCopy(string $cid, string $disclosureHash, mixed $basis, array &$notes): string
     {
-        $fetched = $this->fetch($this->ipfsGateway($cid));
-        if ($fetched['status'] !== null) {
-            $notes[] = "disclosureCopy UNAVAILABLE: the IPFS gateway answered HTTP {$fetched['status']} for CID {$cid}. This is NOT a hash mismatch.";
+        $gateways = $this->ipfsGateways();
+        if ($gateways === []) {
+            $notes[] = "disclosureCopy UNAVAILABLE: no IPFS gateway is configured to fetch CID {$cid}. This is NOT a hash mismatch.";
             return 'unavailable';
-        }
-        $body = $fetched['body'] === null ? null : self::decodeJson($fetched['body']);
-        if ($body === null) {
-            $notes[] = "disclosureCopy UNAVAILABLE: fetching the IPFS body for CID {$cid} failed or timed out. This is NOT a hash mismatch.";
-            return 'unavailable';
-        }
-        $body = $body['value'];
-
-        // The pinned IPFS body wraps the disclosure map under `disclosure` and carries NO legalBasis today
-        // (IpfsDocumentService::canonicalPayload). If a body ever carries one, it must agree with the signed one.
-        $bodyObject = self::asObject($body);
-        $disclosure = self::asObject($bodyObject['disclosure'] ?? null);
-        try {
-            if ($basis !== null) {
-                if (
-                    array_key_exists('legalBasis', $bodyObject)
-                    && $this->canonicalizer->encode($bodyObject['legalBasis']) !== $this->canonicalizer->encode($basis)
-                ) {
-                    $notes[] = 'disclosureCopy FAILED (disclosureVersion 2): the IPFS document body carries a legalBasis that differs from the signed one.';
-                    return 'fail';
-                }
-                $computed = $this->disclosureHashOf(['disclosure' => $disclosure, 'legalBasis' => $basis]);
-            } else {
-                $computed = $this->disclosureHashOf($disclosure);
-            }
-        } catch (Throwable $e) {
-            $notes[] = "disclosureCopy FAILED: the IPFS document body or the legalBasis cannot be canonicalized ({$e->getMessage()}), so the copy cannot be checked.";
-            return 'fail';
         }
         $label = $basis !== null ? ' (disclosureVersion 2: {disclosure, legalBasis})' : '';
-        if ($computed === $disclosureHash) {
-            $notes[] = "Disclosure copy verified{$label}: the IPFS document body matches the signed disclosureHash {$disclosureHash}.";
+        $judge = function (string $bytes) use ($basis, $disclosureHash): array {
+            // A UTF-8 decoder drops a leading byte order mark, as the TS SDK's does.
+            $text = str_starts_with($bytes, "\xEF\xBB\xBF") ? substr($bytes, 3) : $bytes;
+            $body = preg_match('//u', $text) === 1 ? self::decodeJson($text) : null;
+            if ($body === null) {
+                return ['status' => 'fail', 'detail' => 'is not a JSON document, so it carries no disclosure to compare'];
+            }
+            // The pinned IPFS body wraps the disclosure map under `disclosure` and carries NO legalBasis today
+            // (IpfsDocumentService::canonicalPayload). If a body ever carries one, it must agree with the signed one.
+            $bodyObject = self::asObject($body['value']);
+            $disclosure = self::asObject($bodyObject['disclosure'] ?? null);
+            try {
+                if ($basis !== null) {
+                    if (
+                        array_key_exists('legalBasis', $bodyObject)
+                        && $this->canonicalizer->encode($bodyObject['legalBasis']) !== $this->canonicalizer->encode($basis)
+                    ) {
+                        return ['status' => 'fail', 'detail' => 'carries a legalBasis that differs from the signed one'];
+                    }
+                    $computed = $this->disclosureHashOf(['disclosure' => $disclosure, 'legalBasis' => $basis]);
+                } else {
+                    $computed = $this->disclosureHashOf($disclosure);
+                }
+            } catch (Throwable $e) {
+                return [
+                    'status' => 'fail',
+                    'detail' => "or the legalBasis cannot be canonicalized ({$e->getMessage()}), so the copy cannot be checked",
+                ];
+            }
+            return $computed === $disclosureHash
+                ? ['status' => 'pass', 'detail' => "matches the signed disclosureHash {$disclosureHash}"]
+                : ['status' => 'fail', 'detail' => "hashes to {$computed}, not the signed disclosureHash {$disclosureHash}"];
+        };
+        $read = Ipfs::readPinnedFile(
+            $cid,
+            $gateways,
+            $this->pinnedGet(...),
+            $judge,
+            static fn (array $verdict): bool => $verdict['status'] === 'pass',
+        );
+        if (!$read['delivered']) {
+            $tried = implode('; ', array_map(static fn (array $a): string => "{$a['gateway']} ({$a['failure']})", $read['attempts']));
+            $notes[] = "disclosureCopy UNAVAILABLE: no IPFS gateway delivered the file of CID {$cid}: {$tried}. This is NOT a hash mismatch.";
+            return 'unavailable';
+        }
+        $this->disclosureGateway = $read['gateway'];
+        if ($read['verdict']['status'] === 'pass') {
+            $notes[] = "Disclosure copy verified{$label}: the IPFS document served by {$read['gateway']} {$read['verdict']['detail']}.";
             return 'pass';
         }
-        $notes[] = "disclosureCopy FAILED{$label}: the IPFS document body hashes to {$computed}, not the signed disclosureHash {$disclosureHash}.";
+        $notes[] = "disclosureCopy FAILED{$label}: the IPFS document of CID {$cid}, served by {$read['gateway']} and re-encoding to that "
+            . "CID, {$read['verdict']['detail']}.";
         return 'fail';
     }
 
@@ -846,31 +1158,30 @@ final class ReceiptVerifier
     }
 
     /**
-     * OPT-IN (rpcUrl), BUNDLE ONLY: eth_call registry(consentRef) for each cell's consentRef. The record is tied to
-     * this receipt only through the Merkle root, which is trusted only once the passkey assertion is bound to it.
-     * A withdrawn cell (state 2) is never a pass: the consent is no longer in force, however authentic.
-     * TRAP: the ref list is signed by no one, so a file can drop a withdrawn ref. Every accepted cell the receipt lists
-     * counts, and one with no ref is unreadable: a floor, since the items are not proven exhaustive either.
+     * OPT-IN (rpcUrl): eth_call registry(consentRef) for each ref. The record is tied to this receipt only through the
+     * Merkle root, which is trusted only once a signature binds it: `$untrusted` is the note when none does. A
+     * withdrawn cell (state 2) is never a pass: the consent is no longer in force, however authentic.
+     * TRAP: a bundle's ref list is signed by no one, so a file can drop a withdrawn ref. Every accepted cell the receipt
+     * lists counts (`cells`), and one with no ref is unreadable: a floor, since the items are not proven exhaustive
+     * either. With `countAnchoredRefs`, the AnchorBatch log of the trusted root says how many refs its anchor wrote.
      *
-     * @param array<array-key,mixed> $r
-     * @param array<array-key,mixed> $bundle
+     * @param list<string> $refs
+     * @param array{cells:int, countAnchoredRefs:bool} $expected
      * @param list<string> $notes
      */
-    private function verifyConsentAnchor(array $r, array $bundle, string $merkleRoot, string $citizenAssertion, array &$notes): string
+    private function verifyConsentAnchor(array $refs, string $merkleRoot, ?string $untrusted, array $expected, array &$notes): string
     {
-        $rpcUrl = self::asString($this->opts['rpcUrl'] ?? null);
+        $rpcUrl = $this->rpcUrl();
         if ($rpcUrl === '') {
             $notes[] = "consentAnchor skipped: pass an rpcUrl to read the consent's on-chain record.";
             return 'skipped';
         }
-        $refs = self::collectConsentRefs($bundle);
         if ($refs === []) {
             $notes[] = 'consentAnchor skipped: the bundle carries no consentRef to read on chain.';
             return 'skipped';
         }
-        if ($citizenAssertion !== 'pass') {
-            $notes[] = "consentAnchor skipped: the bundle's Merkle root is not bound by a verified passkey assertion, so no on-chain "
-                . 'record can be tied to this receipt.';
+        if ($untrusted !== null) {
+            $notes[] = $untrusted;
             return 'skipped';
         }
         $chainId = $this->chainId();
@@ -883,7 +1194,7 @@ final class ReceiptVerifier
         $root = strtolower(self::stripHex($merkleRoot));
         $selector = substr(Keccak::hashHex('registry(bytes32)'), 0, 10);
         $records = [];
-        $cells = max(count($refs), self::acceptedCellCount($r));
+        $cells = max(count($refs), $expected['cells']);
         $active = 0;
         $withdrawn = 0;
         $pending = 0;
@@ -913,6 +1224,8 @@ final class ReceiptVerifier
         }
         if ($records !== []) {
             $this->consentRecords = $records;
+            $times = array_column($records, 'anchoredAt');
+            $this->consentTiming = ['earliest' => min($times), 'latest' => max($times)];
         }
 
         if ($foreign !== []) {
@@ -920,8 +1233,26 @@ final class ReceiptVerifier
                 . "bundle's, so the bundle's chain reference does not belong to this receipt.";
             return 'fail';
         }
+        // How many refs the consent's own anchor wrote: the bundle's ref list and its items are signed by no one, the
+        // AnchorBatch log of the trusted root is (chain.js readAnchoredRefCount). Unknown is never in force.
+        $batchRefs = null;
+        $countUnknown = false;
+        if ($expected['countAnchoredRefs'] && $records !== []) {
+            $batchRefs = $this->readAnchorBatchCount($rpcUrl, $target['address'], '0x' . $root, array_column($records, 'anchoredBlock'));
+            if ($batchRefs === null) {
+                $countUnknown = true;
+            } else {
+                // Only a ref the chain records under the trusted root fills a slot. TRAP: never subtract what the bundle
+                // names: it can pad its list with refs that were never anchored.
+                $cells = max($cells, $batchRefs);
+                $unread = max(0, $cells - $active - $withdrawn - $pending);
+            }
+        }
         $counts = "{$cells} cell(s): {$active} active, {$withdrawn} withdrawn, {$pending} not anchored yet, {$unread} unreadable";
         $this->consentCounts = ['cells' => $cells, 'active' => $active, 'withdrawn' => $withdrawn, 'pending' => $pending, 'unreadable' => $unread];
+        if ($batchRefs !== null) {
+            $this->consentCounts['anchorBatchRefs'] = $batchRefs;
+        }
         $blocks = implode(', ', array_values(array_unique(array_column($records, 'anchoredBlock'))));
         if ($withdrawn > 0) {
             $notes[] = "consentAnchor WITHDRAWN on chainId {$chainId} ({$counts}). The chain records the consent under "
@@ -931,17 +1262,44 @@ final class ReceiptVerifier
         }
         if ($active !== $cells) {
             $named = count($refs);
-            $unnamed = $cells > $named
-                ? " The bundle names a consentRef for {$named} of the receipt's {$cells} accepted cells, and "
-                    . 'no one signs that list: an unnamed cell counts as unreadable.'
-                : '';
+            $unnamed = '';
+            if ($batchRefs !== null && $batchRefs > $named) {
+                $unnamed = " The consent's anchor wrote {$batchRefs} refs and the bundle names {$named}: an unnamed ref counts as unreadable.";
+            } elseif ($cells > $named) {
+                $unnamed = " The bundle names a consentRef for {$named} of the receipt's {$cells} accepted cells, and "
+                    . 'no one signs that list: an unnamed cell counts as unreadable.';
+            }
             $notes[] = "consentAnchor UNAVAILABLE on chainId {$chainId} ({$counts}).{$unnamed} Anchoring is asynchronous and an "
                 . 'RPC can fail: this is NOT a contradiction.';
+            return 'unavailable';
+        }
+        if ($countUnknown) {
+            $notes[] = "consentAnchor UNAVAILABLE on chainId {$chainId} ({$counts}): how many refs the consent's anchor wrote "
+                . 'could not be read (no single AnchorBatch log of this root at the one block its refs sit in), so the consent '
+                . 'is not shown in force. This is NOT a contradiction.';
             return 'unavailable';
         }
         $notes[] = "Consent anchor FOUND on chainId {$chainId} under this bundle's Merkle root ({$counts}), anchored in "
             . "block {$blocks}.";
         return 'pass';
+    }
+
+    /**
+     * The refCount of the ONE AnchorBatch log for `$root` at the ONE block every matching ref sits in, read with a
+     * single-block eth_getLogs on the registry read (AnchorBatch). Null (unknown) when the refs sit at more than one
+     * block, on a read failure, or when anything but exactly one log of that root, from that address, at that block
+     * answers.
+     *
+     * @param list<int> $blocks
+     */
+    private function readAnchorBatchCount(string $rpcUrl, string $address, string $root, array $blocks): ?int
+    {
+        $tag = AnchorBatch::blockTag($blocks);
+        if ($tag === null) {
+            return null;
+        }
+        $call = $this->rpc($rpcUrl, 'eth_getLogs', [AnchorBatch::filter($address, $root, $tag)]);
+        return $call['ok'] ? AnchorBatch::refCount($call['result'], $address, $root, $blocks[0]) : null;
     }
 
     /**
@@ -1032,7 +1390,7 @@ final class ReceiptVerifier
      * The key that checks proof[0] (companyKeyMethod). A document that did not resolve is "unresolved" (unavailable); a
      * resolved one with no such method, or whose method carries no Ed25519 multikey, is "unlisted" (fail).
      *
-     * @return array{kind:'unresolved'}|array{kind:'unlisted'}|array{kind:'key', key:string, vmId:string}
+     * @return array{kind:'unresolved'}|array{kind:'unlisted'}|array{kind:'key', key:string, vmId:string, doc:array<array-key,mixed>}
      */
     private function resolveCompanyKey(string $issuer, string $vmId): array
     {
@@ -1045,7 +1403,7 @@ final class ReceiptVerifier
             return ['kind' => 'unlisted'];
         }
         try {
-            return ['kind' => 'key', 'key' => Multibase::decodeEd25519PublicKey($vm['publicKeyMultibase']), 'vmId' => $vm['id']];
+            return ['kind' => 'key', 'key' => Multibase::decodeEd25519PublicKey($vm['publicKeyMultibase']), 'vmId' => $vm['id'], 'doc' => $doc];
         } catch (Throwable) {
             return ['kind' => 'unlisted'];
         }
@@ -1099,14 +1457,60 @@ final class ReceiptVerifier
         return is_array($doc) || $doc instanceof stdClass ? (array) $doc : null;
     }
 
-    private function ipfsGateway(string $cid): string
+    /**
+     * The gateways asked for an IPFS document, in order: the one the caller names (ipfsGateway, a string or a function
+     * of the CID) first, then ipfsGateways (strings), the default list when that option is not an array. An empty
+     * ipfsGateways with no ipfsGateway asks none.
+     *
+     * @return list<mixed>
+     */
+    private function ipfsGateways(): array
     {
-        $gw = $this->opts['ipfsGateway'] ?? null;
-        if (is_callable($gw)) {
-            $out = $gw($cid);
-            return is_string($out) ? $out : self::DEFAULT_IPFS_GATEWAY . $cid;
+        $named = $this->opts['ipfsGateway'] ?? null;
+        $list = $this->opts['ipfsGateways'] ?? null;
+        $first = $named !== null && Ipfs::isGateway($named) ? [$named] : [];
+        $rest = is_array($list) ? array_values(array_filter($list, 'is_string')) : Ipfs::DEFAULT_GATEWAYS;
+        return [...$first, ...$rest];
+    }
+
+    /**
+     * GET one gateway's copy of a pinned file. An injected httpGet answers as it does for every GET (a failure is null,
+     * with no status); curl sends no Accept header, follows redirects as a browser fetch does, and stops reading one
+     * byte past MAX_SINGLE_BLOCK_BYTES, so a hostile gateway cannot make the verifier buffer more.
+     *
+     * @return array{body:?string, status:?int}
+     */
+    private function pinnedGet(string $url): array
+    {
+        if (is_callable($this->opts['httpGet'] ?? null) || $url === '') {
+            return $this->fetch($url);
         }
-        return self::DEFAULT_IPFS_GATEWAY . $cid;
+        $cap = Ipfs::MAX_SINGLE_BLOCK_BYTES + 1;
+        $body = '';
+        $ch = curl_init();
+        curl_setopt_array($ch, [
+            CURLOPT_URL => $url,
+            CURLOPT_HTTPGET => true,
+            CURLOPT_FOLLOWLOCATION => true,
+            CURLOPT_MAXREDIRS => 20,
+            CURLOPT_PROTOCOLS => CURLPROTO_HTTP | CURLPROTO_HTTPS,
+            CURLOPT_REDIR_PROTOCOLS => CURLPROTO_HTTP | CURLPROTO_HTTPS,
+            CURLOPT_TIMEOUT_MS => self::positiveInt($this->opts['timeoutMs'] ?? null, self::DEFAULT_TIMEOUT_MS),
+            CURLOPT_WRITEFUNCTION => static function ($handle, string $chunk) use (&$body, $cap): int {
+                $body .= substr($chunk, 0, max(0, $cap - strlen($body)));
+                // Returning fewer bytes than were handed over aborts the transfer.
+                return strlen($body) >= $cap ? 0 : strlen($chunk);
+            },
+        ]);
+        $ok = curl_exec($ch);
+        $status = (int) curl_getinfo($ch, CURLINFO_RESPONSE_CODE);
+        if ($status !== 0 && ($status < 200 || $status > 299)) {
+            return ['body' => null, 'status' => $status];
+        }
+        if (strlen($body) >= $cap) {
+            return ['body' => $body, 'status' => null];
+        }
+        return $ok === true && $status !== 0 ? ['body' => $body, 'status' => null] : ['body' => null, 'status' => null];
     }
 
     /**
@@ -1180,7 +1584,10 @@ final class ReceiptVerifier
 
     // --- helpers -------------------------------------------------------------
 
-    /** @param array<array-key,mixed> $r */
+    /**
+     * @param array<array-key,mixed> $r
+     * @return 'company_attested'|'company_documented'|'citizen'
+     */
     private static function receiptType(array $r): string
     {
         $types = self::asArray($r['type'] ?? null);
@@ -1952,6 +2359,43 @@ final class ReceiptVerifier
             }
         }
         return null;
+    }
+
+    /**
+     * The instant the company key signed (issuer.js signingInstantOf): a recorded receipt of version 2 to 4 was signed
+     * when the organisation recorded it, a version 1 recorded receipt and a passkey receipt at grantedAt. A version 2
+     * to 4 without recordedAt yields null.
+     *
+     * @param array<array-key,mixed> $r
+     */
+    private static function signingInstantOf(array $r): ?string
+    {
+        $consent = self::asObject(self::asObject($r['credentialSubject'] ?? null)['consent'] ?? null);
+        $at = in_array($r['receiptVersion'] ?? null, ['2', '3', '4'], true) ? $consent['recordedAt'] ?? null : $consent['grantedAt'] ?? null;
+        return is_string($at) ? $at : null;
+    }
+
+    /** An instant (parseInstant) as whole unix seconds, floored, or null. */
+    private static function secondsOf(?string $instant): ?int
+    {
+        $ms = self::parseInstant($instant);
+        return $ms === null ? null : intdiv($ms - (($ms % 1000) + 1000) % 1000, 1000);
+    }
+
+    private function rpcUrl(): string
+    {
+        return self::asString($this->opts['rpcUrl'] ?? null);
+    }
+
+    /** The verifier's clock in unix seconds: the `now` option (a callable returning unix seconds), else time(). */
+    private function nowSeconds(): int
+    {
+        $clock = $this->opts['now'] ?? null;
+        $t = is_callable($clock) ? $clock() : null;
+        if (is_int($t)) {
+            return $t;
+        }
+        return is_float($t) && is_finite($t) ? (int) floor($t) : time();
     }
 
     /**

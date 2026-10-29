@@ -176,6 +176,20 @@ final class BundleVerificationTest extends TestCase
         return RegistryAnswers::onReadableRegistry(self::artefact($name));
     }
 
+    /**
+     * Both keys in force and the anchor's own log: only the consent record is left to decide.
+     *
+     * @return array<string,callable>
+     */
+    private static function keysInForce(string $root, ?string $logAddress = null): array
+    {
+        return [
+            'keyOf' => static fn (): string => RegistryAnswers::keyInForce(),
+            'companyKeyOf' => static fn (): string => RegistryAnswers::keyInForce(),
+            'logs' => static fn (): array => [RegistryAnswers::anchorBatchLog($root, 3, 53000000, $logAddress)],
+        ];
+    }
+
     /** The selector of an eth_call request's data. */
     private static function selectorOf(mixed $params): string
     {
@@ -216,13 +230,12 @@ final class BundleVerificationTest extends TestCase
 
     public function testAnAbsentDocumentRecordIsUnavailableNotFailAndLeavesAVerifiedBundleVerified(): void
     {
-        $calls = [];
-        $result = self::verify(self::readable('cidv1.bundle'), self::SEPOLIA + [
-            'httpPost' => self::rpc(
-                static fn (string $m, array $p): array => ['result', self::selectorOf($p) === '0x6d6f398e' ? RegistryAnswers::rootWord(0) : null],
-                $calls,
-            ),
+        $chain = RegistryAnswers::chain([
+            'rootOf' => static fn (): string => RegistryAnswers::rootWord(0),
+            'keyOf' => static fn (): string => RegistryAnswers::keyInForce(),
+            'companyKeyOf' => static fn (): string => RegistryAnswers::keyInForce(),
         ]);
+        $result = self::verify(RegistryAnswers::salted(self::readable('cidv1.bundle')), self::SEPOLIA + ['httpPost' => $chain->post(...)]);
         $this->assertSame('unavailable', $result->documentAnchor);
         $this->assertStringContainsString('not anchored yet', implode("\n", $result->notes));
         $this->assertSame('verified', $result->overall);
@@ -298,22 +311,25 @@ final class BundleVerificationTest extends TestCase
     {
         $bundle = self::readable('a1v1.bundle');
         $root = is_string($bundle['merkleRoot'] ?? null) ? $bundle['merkleRoot'] : '';
-        $calls = [];
-        $result = self::verify($bundle, self::SEPOLIA + [
-            'httpPost' => self::rpc(static fn (string $m): array => ['result', $m === 'eth_call' ? RegistryAnswers::anchorWord($root, 1760000000) : null], $calls),
+        $chain = RegistryAnswers::chain(self::keysInForce($root) + [
+            'registry' => static fn (): string => RegistryAnswers::anchorWord($root, RegistryAnswers::A1V1_ANCHORED_AT),
         ]);
+        $result = self::verify(RegistryAnswers::salted($bundle), self::SEPOLIA + ['httpPost' => $chain->post(...)]);
         $this->assertSame('pass', $result->consentAnchor);
         $this->assertSame('verified', $result->overall);
-        $call = array_values(array_filter($calls, static fn (array $c): bool => $c['method'] === 'eth_call'))[0];
         /** @var list<string> $refs */
         $refs = $bundle['consentRefs'];
+        $call = array_values(array_filter(
+            $chain->callsOf('eth_call'),
+            static fn (array $c): bool => is_array($c['params'][0] ?? null) && ($c['params'][0]['data'] ?? null) === '0x7ef50298' . substr($refs[0], 2),
+        ))[0] ?? null;
+        $this->assertNotNull($call);
         /** @var array{data:string, to:string} $tx */
         $tx = $call['params'][0];
-        $this->assertSame('0x7ef50298' . substr($refs[0], 2), $tx['data']);
         $this->assertSame(RegistryAnswers::SEPOLIA_REGISTRY, $tx['to']);
         $this->assertCount(count($refs), $result->consentAnchorRecords ?? []);
         $this->assertSame(
-            ['consentRef' => strtolower($refs[0]), 'state' => 'active', 'anchoredAt' => 1760000000, 'revokedAt' => 0, 'anchoredBlock' => 53000000],
+            ['consentRef' => strtolower($refs[0]), 'state' => 'active', 'anchoredAt' => RegistryAnswers::A1V1_ANCHORED_AT, 'revokedAt' => 0, 'anchoredBlock' => 53000000],
             ($result->consentAnchorRecords ?? [])[0] ?? null,
         );
         $this->assertStringContainsString('anchored in block 53000000', implode("\n", $result->notes));
@@ -323,14 +339,19 @@ final class BundleVerificationTest extends TestCase
     {
         $bundle = self::readable('a1v1.bundle');
         $root = is_string($bundle['merkleRoot'] ?? null) ? $bundle['merkleRoot'] : '';
-        $calls = [];
-        $result = self::verify($bundle, self::SEPOLIA + [
-            'httpPost' => self::rpc(static fn (string $m): array => ['result', $m === 'eth_call' ? RegistryAnswers::anchorWord($root, 1760000000, 1760000600, 2) : null], $calls),
+        $chain = RegistryAnswers::chain(self::keysInForce($root) + [
+            'registry' => static fn (): string => RegistryAnswers::anchorWord(
+                $root,
+                RegistryAnswers::A1V1_ANCHORED_AT,
+                RegistryAnswers::A1V1_ANCHORED_AT + 600,
+                2,
+            ),
         ]);
+        $result = self::verify(RegistryAnswers::salted($bundle), self::SEPOLIA + ['httpPost' => $chain->post(...)]);
         $this->assertSame('withdrawn', $result->consentAnchor);
         $first = ($result->consentAnchorRecords ?? [])[0] ?? [];
         $this->assertSame('withdrawn', $first['state'] ?? null);
-        $this->assertSame(1760000600, $first['revokedAt'] ?? null);
+        $this->assertSame(RegistryAnswers::A1V1_ANCHORED_AT + 600, $first['revokedAt'] ?? null);
         $this->assertStringContainsString('WITHDRAWN', implode("\n", $result->notes));
         $this->assertStringContainsString('NOT a forgery', implode("\n", $result->notes));
     }
@@ -339,10 +360,15 @@ final class BundleVerificationTest extends TestCase
     {
         $bundle = self::readable('a1v1.bundle');
         $root = is_string($bundle['merkleRoot'] ?? null) ? $bundle['merkleRoot'] : '';
-        $calls = [];
-        $result = self::verify($bundle, self::SEPOLIA + [
-            'httpPost' => self::rpc(static fn (string $m): array => ['result', $m === 'eth_call' ? RegistryAnswers::anchorWord($root, 1760000000, 1760000600, 2) : null], $calls),
+        $chain = RegistryAnswers::chain(self::keysInForce($root) + [
+            'registry' => static fn (): string => RegistryAnswers::anchorWord(
+                $root,
+                RegistryAnswers::A1V1_ANCHORED_AT,
+                RegistryAnswers::A1V1_ANCHORED_AT + 600,
+                2,
+            ),
         ]);
+        $result = self::verify(RegistryAnswers::salted($bundle), self::SEPOLIA + ['httpPost' => $chain->post(...)]);
         $this->assertSame(['pass', 'pass', 'pass'], [$result->companySignature, $result->receiptIntegrity, $result->citizenAssertion]);
         $this->assertSame('withdrawn', $result->overall);
     }
@@ -368,17 +394,18 @@ final class BundleVerificationTest extends TestCase
     {
         $bundle = self::readable('cidv1.bundle');
         $root = is_string($bundle['merkleRoot'] ?? null) ? $bundle['merkleRoot'] : '';
-        $calls = [];
-        $result = self::verify($bundle, self::SEPOLIA + [
-            'httpPost' => self::rpc(
-                static fn (string $m, array $p): array => match (true) {
-                    $m !== 'eth_call' => ['result', null],
-                    self::selectorOf($p) === '0x6d6f398e' => ['down'],
-                    default => ['result', RegistryAnswers::anchorWord($root, 1760000000, 1760000600, 2)],
-                },
-                $calls,
+        $chain = RegistryAnswers::chain([
+            'rootOf' => static fn (): bool => false,
+            'registry' => static fn (): string => RegistryAnswers::anchorWord(
+                $root,
+                RegistryAnswers::CIDV1_ANCHORED_AT,
+                RegistryAnswers::CIDV1_ANCHORED_AT + 600,
+                2,
             ),
+            'keyOf' => static fn (): string => RegistryAnswers::keyInForce(),
+            'companyKeyOf' => static fn (): string => RegistryAnswers::keyInForce(),
         ]);
+        $result = self::verify(RegistryAnswers::salted($bundle), self::SEPOLIA + ['httpPost' => $chain->post(...)]);
         $this->assertSame('unavailable', $result->documentAnchor);
         $this->assertSame('withdrawn', $result->consentAnchor);
         $this->assertSame('withdrawn', $result->overall);
@@ -388,14 +415,18 @@ final class BundleVerificationTest extends TestCase
     {
         $bundle = RegistryAnswers::onMainnetRegistry(self::artefact('a1v1.bundle'));
         $root = is_string($bundle['merkleRoot'] ?? null) ? $bundle['merkleRoot'] : '';
-        $calls = [];
-        $result = self::verify($bundle, ['rpcUrl' => 'https://rpc.test', 'chainId' => 8453, 'httpPost' => self::rpc(static fn (string $m): array => ['result', $m === 'eth_call' ? RegistryAnswers::anchorWord($root, 1760000000) : null], $calls)]);
+        $chain = RegistryAnswers::chain(self::keysInForce($root, strtolower(RegistryAnswers::MAINNET_REGISTRY)) + [
+            'registry' => static fn (): string => RegistryAnswers::anchorWord($root, RegistryAnswers::A1V1_ANCHORED_AT),
+        ]);
+        $result = self::verify(RegistryAnswers::salted($bundle), ['rpcUrl' => 'https://rpc.test', 'chainId' => 8453, 'httpPost' => $chain->post(...)]);
         $this->assertSame('pass', $result->consentAnchor);
         $this->assertStringNotContainsString('no known registry', implode("\n", $result->notes));
-        $call = array_values(array_filter($calls, static fn (array $c): bool => $c['method'] === 'eth_call'))[0];
-        /** @var array{to:string} $tx */
-        $tx = $call['params'][0];
-        $this->assertSame(RegistryAnswers::MAINNET_REGISTRY, $tx['to']);
+        $this->assertCount(3, $chain->refs);
+        foreach ($chain->calls as $call) {
+            /** @var array{to?:string, address?:string} $tx */
+            $tx = $call['params'][0];
+            $this->assertSame(RegistryAnswers::MAINNET_REGISTRY, $tx['to'] ?? $tx['address'] ?? null);
+        }
     }
 
     public function testAFourWordAnswerIsUnreadableNeverARecord(): void

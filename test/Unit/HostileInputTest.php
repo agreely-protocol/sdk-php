@@ -88,15 +88,16 @@ final class HostileInputTest extends TestCase
         $this->assertSame('malformed', self::verify($bundle)->overall);
     }
 
-    public function testAnIpfsBodyNested3000DeepIsAFailedCopyNeverAThrow(): void
+    public function testAnIpfsBodyNested3000DeepNotTheCidsBytesIsNoCopyAtAllAndNeverAThrow(): void
     {
         $body = (string) json_encode(['disclosure' => self::nested(3000)], 0, 4000);
         $result = self::verify(self::artefact('cidv1.bundle'), [
             'verifyDisclosure' => true,
             'httpGet' => static fn (string $url): string => $body,
         ]);
-        // json_decode refuses the body past depth 512, so it reads as an unreadable copy.
         $this->assertSame('unavailable', $result->disclosureCopy);
+        // A gateway serving bytes that are not the file says nothing about the receipt.
+        $this->assertSame('verified', $result->overall);
     }
 
     /** @return iterable<string,array{0:mixed}> */

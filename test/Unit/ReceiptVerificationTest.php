@@ -117,25 +117,38 @@ final class ReceiptVerificationTest extends TestCase
                 ? static fn (string $did): ?array => null
                 : static fn (string $did): ?array => $docs[$did] ?? null,
         ];
-        if (array_key_exists('ipfsBody', $case)) {
-            $body = (string) json_encode($case['ipfsBody']);
+        if (array_key_exists('ipfsFile', $case) || array_key_exists('ipfsBody', $case)) {
+            // The exact pinned bytes, so they re-encode to the CID; an ipfsBody is never fetched by a case that reads it.
+            $bytes = array_key_exists('ipfsFile', $case)
+                ? (string) file_get_contents($dir . Wire::str($case['ipfsFile']))
+                : (string) json_encode($case['ipfsBody']);
             $opts['verifyDisclosure'] = true;
-            $opts['ipfsGateway'] = static fn (string $cid): string => "https://ipfs.test/{$cid}";
-            $opts['httpGet'] = static fn (string $url): string => $body;
+            $opts['ipfsGateway'] = 'https://ipfs.test/ipfs/';
+            $opts['ipfsGateways'] = [];
+            $opts['httpGet'] = static fn (string $url): string => $bytes;
         }
 
         if (is_array($case['chain'] ?? null)) {
-            /** @var array{chainId:int, registryAddress:string, registryAnswer:string} $chain */
+            /** @var array{chainId:int, registryAddress:string, registryAnswer:string, companyKeyOfAnswer:string, now:int} $chain */
             $chain = $case['chain'];
             $opts['rpcUrl'] = 'https://rpc.test';
             $opts['chainId'] = $chain['chainId'];
             $opts['registryAddress'] = $chain['registryAddress'];
+            $opts['now'] = static fn (): int => $chain['now'];
+            // By selector: registry(bytes32) answers registryAnswer, companyKeyOf(bytes32,bytes32) companyKeyOfAnswer,
+            // and any other call is refused.
             $opts['httpPost'] = static function (string $url, string $body) use ($chain): string {
                 /** @var array{method?:string, params?:list<array{data?:string}>} $req */
                 $req = json_decode($body, true);
                 $data = $req['params'][0]['data'] ?? '';
-                return (string) json_encode(($req['method'] ?? '') === 'eth_call' && str_starts_with($data, '0x7ef50298')
-                    ? ['jsonrpc' => '2.0', 'id' => 1, 'result' => $chain['registryAnswer']]
+                $result = match (true) {
+                    ($req['method'] ?? '') !== 'eth_call' => null,
+                    str_starts_with($data, '0x7ef50298') => $chain['registryAnswer'],
+                    str_starts_with($data, '0x25597a89') => $chain['companyKeyOfAnswer'],
+                    default => null,
+                };
+                return (string) json_encode($result !== null
+                    ? ['jsonrpc' => '2.0', 'id' => 1, 'result' => $result]
                     : ['jsonrpc' => '2.0', 'id' => 1, 'error' => ['message' => 'not served by this vector']]);
             };
         }

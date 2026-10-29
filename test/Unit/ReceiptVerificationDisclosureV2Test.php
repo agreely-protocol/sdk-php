@@ -72,6 +72,43 @@ final class ReceiptVerificationDisclosureV2Test extends TestCase
         return '0x' . hash('sha256', (new Canonicalizer())->encode($preimage));
     }
 
+    /** The bytes the stub gateway serves for `$body`. */
+    private static function served(mixed $body): string
+    {
+        return (string) json_encode($body, 0, 4000);
+    }
+
+    /** The CIDv1 (raw, sha2-256, base32) of the bytes the stub gateway serves for `$body`: under it, that body IS the pinned file. */
+    private static function cidOf(mixed $body): string
+    {
+        $alphabet = 'abcdefghijklmnopqrstuvwxyz234567';
+        $out = 'b';
+        $value = 0;
+        $bits = 0;
+        foreach (str_split("\x01\x55\x12\x20" . hash('sha256', self::served($body), true)) as $byte) {
+            $value = (($value << 8) | ord($byte)) & 0xffff;
+            $bits += 8;
+            while ($bits >= 5) {
+                $out .= $alphabet[($value >> ($bits - 5)) & 31];
+                $bits -= 5;
+            }
+        }
+        return $bits > 0 ? $out . $alphabet[($value << (5 - $bits)) & 31] : $out;
+    }
+
+    /**
+     * The v2 offer naming the CID of `$body`, so the copy served is the one the company pinned.
+     *
+     * @return array<string,mixed>
+     */
+    private function offerPinning(mixed $body): array
+    {
+        return $this->offer(static function (array $o) use ($body): array {
+            $o['document'] = ['ipfsCid' => self::cidOf($body)] + self::DOCUMENT;
+            return $o;
+        });
+    }
+
     /**
      * A company-signed v2 offer (edit it before signing for a v1 or another variant).
      *
@@ -187,7 +224,7 @@ final class ReceiptVerificationDisclosureV2Test extends TestCase
             'resolver' => $this->company->resolver(),
             'verifyDisclosure' => true,
             'ipfsGateway' => static fn (string $cid): string => "https://ipfs.test/{$cid}",
-            'httpGet' => static fn (string $url): string => (string) json_encode($body),
+            'httpGet' => static fn (string $url): string => self::served($body),
         ]);
     }
 
@@ -213,17 +250,30 @@ final class ReceiptVerificationDisclosureV2Test extends TestCase
         $this->assertStringContainsString('disclosureVersion 2', self::notesOf($result));
     }
 
-    public function testAV2BundleWhoseIpfsDisclosureWasTamperedFails(): void
+    public function testAV2BundleWhosePinnedIpfsDisclosureDiffersFromTheSignedOneFails(): void
     {
         $tampered = self::IPFS_BODY;
         $tampered['disclosure']['purpose']['en'] = 'Marketing, shared with partners.';
-        $this->assertSame('fail', $this->verifyWithCopy($this->bundleOf($this->offer()), $tampered)->disclosureCopy);
+        $result = $this->verifyWithCopy($this->bundleOf($this->offerPinning($tampered)), $tampered);
+        $this->assertSame('fail', $result->disclosureCopy);
+        $this->assertSame('https://ipfs.test', $result->disclosureGateway);
+    }
+
+    public function testATamperedBodyUnderACidThisVerifierCannotRecomputeIsNeverAPassNorAFail(): void
+    {
+        $tampered = self::IPFS_BODY;
+        $tampered['disclosure']['purpose']['en'] = 'Marketing, shared with partners.';
+        $result = $this->verifyWithCopy($this->bundleOf($this->offer()), $tampered);
+        // No gateway delivered the file.
+        $this->assertSame('unavailable', $result->disclosureCopy);
+        $this->assertArrayNotHasKey('disclosureGateway', $result->toArray());
+        $this->assertStringContainsString('This is NOT a hash mismatch', self::notesOf($result));
     }
 
     public function testAnIpfsBodyCarryingALegalBasisThatDiffersFromTheSignedOneFails(): void
     {
         $body = self::IPFS_BODY + ['legalBasis' => ['0x01' => ['basis' => 'consent', 'justificationFr' => '']]];
-        $result = $this->verifyWithCopy($this->bundleOf($this->offer()), $body);
+        $result = $this->verifyWithCopy($this->bundleOf($this->offerPinning($body)), $body);
         $this->assertSame('fail', $result->disclosureCopy);
         $this->assertStringContainsString('differs from the signed one', self::notesOf($result));
     }
@@ -275,9 +325,21 @@ final class ReceiptVerificationDisclosureV2Test extends TestCase
     {
         $body = self::IPFS_BODY;
         $body['disclosure']['copies'] = 3;
-        $result = $this->verifyWithCopy($this->bundleOf($this->offer()), $body);
+        $result = $this->verifyWithCopy($this->bundleOf($this->offerPinning($body)), $body);
         $this->assertSame('fail', $result->disclosureCopy);
         $this->assertStringContainsString('cannot be canonicalized', self::notesOf($result));
+    }
+
+    public function testAnIpfsBodyNested3000DeepUnderItsOwnCidFailsAndDoesNotThrow(): void
+    {
+        $deep = 'x';
+        for ($i = 0; $i < 3000; $i++) {
+            $deep = ['d' => $deep];
+        }
+        $body = ['disclosure' => $deep] + self::IPFS_BODY;
+        $result = $this->verifyWithCopy($this->bundleOf($this->offerPinning($body)), $body);
+        $this->assertSame('fail', $result->disclosureCopy);
+        $this->assertSame('failed', $result->overall);
     }
 
     // --- opt-in, and a gateway error is never a hash mismatch ---------------------
@@ -356,6 +418,8 @@ final class ReceiptVerificationDisclosureV2Test extends TestCase
     {
         $result = $this->verifyWithCopy($this->recorded(static function (array $c): array {
             $c['legalBasis'] = ['0x01' => ['justificationEn' => 'Something else.'] + self::LEGAL_BASIS['0x01']];
+            // The authentic copy, delivered under its own CID: only the signed basis differs.
+            $c['document'] = ['ipfsCid' => self::cidOf(self::IPFS_BODY)] + self::DOCUMENT;
             return $c;
         }));
         $this->assertSame('pass', $result->companySignature);

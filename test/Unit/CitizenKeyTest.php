@@ -346,23 +346,18 @@ final class CitizenKeyTest extends TestCase
         $docs = self::vector('receipts/did-documents.json');
         $root = substr(Wire::str($bundle['merkleRoot']), 2);
         $calls = 0;
+        $chain = RegistryAnswers::chain([
+            'registry' => static function () use (&$calls, $root): string|bool {
+                return ++$calls > 1 ? false : RegistryAnswers::anchorWord($root, RegistryAnswers::A1V1_ANCHORED_AT);
+            },
+            'companyKeyOf' => static fn (): string => RegistryAnswers::keyInForce(),
+            'logs' => static fn (): array => [RegistryAnswers::anchorBatchLog($root, 3)],
+        ]);
         $result = Agreely::verifyReceipt($bundle, [
             'resolver' => static fn (string $did): ?array => is_array($docs[$did] ?? null) ? $docs[$did] : null,
             'rpcUrl' => 'https://rpc.test',
             'chainId' => 84532,
-            'httpPost' => static function (string $url, string $body) use (&$calls, $root): ?string {
-                /** @var array{method:string} $req */
-                $req = json_decode($body, true);
-                if ($req['method'] !== 'eth_call') {
-                    return (string) json_encode(['jsonrpc' => '2.0', 'id' => 1, 'result' => []]);
-                }
-                $calls++;
-                if ($calls > 1) {
-                    return null;
-                }
-                $record = RegistryAnswers::anchorWord($root, 1760000000);
-                return (string) json_encode(['jsonrpc' => '2.0', 'id' => 1, 'result' => $record]);
-            },
+            'httpPost' => $chain->post(...),
         ]);
         $this->assertSame(3, $calls);
         $this->assertSame('unavailable', $result->consentAnchor);
@@ -383,22 +378,20 @@ final class CitizenKeyTest extends TestCase
         $docs = self::vector('receipts/did-documents.json');
         $root = substr(Wire::str($bundle['merkleRoot']), 2);
         $calls = 0;
+        $chain = RegistryAnswers::chain([
+            'registry' => static function () use (&$calls, $anchored, $root): string {
+                return ++$calls <= $anchored
+                    ? RegistryAnswers::anchorWord($root, RegistryAnswers::A1V1_ANCHORED_AT)
+                    : RegistryAnswers::anchorWord('0x' . str_repeat('0', 64), 0, 0, 0);
+            },
+            'companyKeyOf' => static fn (): string => RegistryAnswers::keyInForce(),
+            'logs' => static fn (): array => [RegistryAnswers::anchorBatchLog($root, 3)],
+        ]);
         $result = Agreely::verifyReceipt($bundle, [
             'resolver' => static fn (string $did): ?array => is_array($docs[$did] ?? null) ? $docs[$did] : null,
             'rpcUrl' => 'https://rpc.test',
             'chainId' => 84532,
-            'httpPost' => static function (string $url, string $body) use (&$calls, $anchored, $root): string {
-                /** @var array{method:string} $req */
-                $req = json_decode($body, true);
-                if ($req['method'] !== 'eth_call') {
-                    return (string) json_encode(['jsonrpc' => '2.0', 'id' => 1, 'result' => []]);
-                }
-                $calls++;
-                $record = $calls <= $anchored
-                    ? RegistryAnswers::anchorWord($root, 1760000000)
-                    : RegistryAnswers::anchorWord('0x' . str_repeat('0', 64), 0, 0, 0);
-                return (string) json_encode(['jsonrpc' => '2.0', 'id' => 1, 'result' => $record]);
-            },
+            'httpPost' => $chain->post(...),
         ]);
         $this->assertSame($status, $result->consentAnchor);
         $this->assertStringContainsString($counts, implode("\n", $result->notes));
