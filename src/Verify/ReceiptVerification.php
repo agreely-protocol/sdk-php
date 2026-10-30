@@ -27,7 +27,9 @@ namespace Agreely\Sdk\Verify;
  * 'withdrawn' (the chain records a cell's withdrawal under that root; withdrawnAt gives the latest, unix seconds,
  * when the record carries it) | 'not_checked' (nothing established it: no rpcUrl, a paper, telephone or bare
  * passkey receipt, a root no verified passkey assertion binds, or a read that did not cover every cell). It says
- * nothing about authenticity: read overall first. Without an rpcUrl a withdrawn consent still reads 'verified'.
+ * nothing about authenticity: read overall first. Without an rpcUrl a withdrawn consent still reads 'verified'. It also
+ * reads 'not_checked' for a consent read in force once its issuer left Agreely and that departure counts (departure):
+ * the chain can no longer tell whether it is still in force.
  */
 final class ReceiptVerification
 {
@@ -63,6 +65,19 @@ final class ReceiptVerification
      * @param array{binding:string, merkleRoot:string, consentRefs:list<string>}|null $signedAnchor a recorded receipt of
      *        version 4 in a bundle, whose signature held: the anchor batch it signs, and how the bundle's own unsigned
      *        root and refs stand against it ('bound', 'contradicts' or 'malformed')
+     * @param string|null $issuerDeparture once the signature held and the issuer's DID document says deactivated (an
+     *        Agreely company DID, checkDeparture not false): 'pass' (signed before or during the departure: the signature
+     *        stands), 'fail' (dated after it: overall 'failed', and the registry is not asked), 'unavailable' (the record
+     *        could not be read or does not establish a departure, or the signing instant does not parse: nothing changes).
+     *        Null for a live issuer.
+     * @param array{state:string, url:string, sealedOn?:string, purgedOn?:string, phase?:string}|null $departure the
+     *        departure record read: state 'departed' (with sealedOn, purgedOn and phase 'before' | 'during' | 'after' |
+     *        'unknown'), 'unreachable' (an HTTP error, a 404 included, a network error or a body that is not JSON: never a
+     *        reading that the issuer stayed) or 'unreadable' (another DID, not purged, days that are not real dates in order)
+     * @param array{status:string, domain:string, keyId:string, resolver:string}|null $liveDns with an rpcUrl, once
+     *        getCompanyDid named the key the company holds today (checkDns not false): the TXT record at _agreely.<domain>
+     *        read over DNS-over-HTTPS against that key. status 'confirmed' | 'not-declared' | 'not-resolvable' |
+     *        'unreachable' (the resolver could not be read: never a negative). It never changes overall or any check.
      */
     public function __construct(
         public readonly string $input,
@@ -88,6 +103,9 @@ final class ReceiptVerification
         public readonly ?string $citizenKeyChain = null,
         public readonly ?array $citizenKey = null,
         public readonly ?array $signedAnchor = null,
+        public readonly ?string $issuerDeparture = null,
+        public readonly ?array $departure = null,
+        public readonly ?array $liveDns = null,
     ) {
     }
 
@@ -120,6 +138,9 @@ final class ReceiptVerification
      *     citizenKeyChain?:string,
      *     citizenKey?:array<string,mixed>,
      *     signedAnchor?:array{binding:string, merkleRoot:string, consentRefs:list<string>},
+     *     issuerDeparture?:string,
+     *     departure?:array{state:string, url:string, sealedOn?:string, purgedOn?:string, phase?:string},
+     *     liveDns?:array{status:string, domain:string, keyId:string, resolver:string},
      *     notes:list<string>
      * }
      */
@@ -170,6 +191,15 @@ final class ReceiptVerification
         }
         if ($this->signedAnchor !== null) {
             $out['signedAnchor'] = $this->signedAnchor;
+        }
+        if ($this->issuerDeparture !== null) {
+            $out['issuerDeparture'] = $this->issuerDeparture;
+        }
+        if ($this->departure !== null) {
+            $out['departure'] = $this->departure;
+        }
+        if ($this->liveDns !== null) {
+            $out['liveDns'] = $this->liveDns;
         }
         $out['notes'] = $this->notes;
         return $out;

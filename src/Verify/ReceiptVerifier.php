@@ -65,12 +65,19 @@ use Throwable;
  *                          which is what serves /did/{did})
  *   - verifyDisclosure:    bool, default false: OPT-IN fetch of the IPFS document copy
  *   - ipfsGateway:         callable(string $cid): string: CID -> URL
- *   - httpGet:             callable(string $url): ?string: fetch body (IPFS, DID), null on any failure
+ *   - httpGet:             callable(string $url): ?string: fetch body (IPFS, DID, departure record, DNS-over-HTTPS),
+ *                          null on any failure. The DNS-over-HTTPS URL must be fetched with
+ *                          `Accept: application/dns-json`, or the resolver refuses it and liveDns reads "unreachable"
  *   - httpPost:            callable(string $url, string $body): ?string: JSON-RPC, null on any failure
  *   - rpcUrl, registryAddress, chainId: opt-in on-chain documentAnchor and consentAnchor, read by
  *                          eth_call. registryAddress (any address, read by eth_call) defaults to the
  *                          known registry of chainId (Base mainnet and Base Sepolia are known). On any
  *                          other chain, pass it, or the anchor checks read "unavailable"
+ *   - checkDeparture:      bool, default true: when the issuer's DID document says deactivated, read its departure
+ *                          record (/c/{slug}/departure.json on the issuer's host); false asks for nothing
+ *   - checkDns:            bool, default true: with an rpcUrl, read the company domain's _agreely TXT record over
+ *                          DNS-over-HTTPS and compare it with the key the registry names today; false asks for nothing
+ *   - dohUrl:              string, default https://cloudflare-dns.com/dns-query: the DNS-over-HTTPS JSON resolver
  *   - timeoutMs:           int, default 10000, per HTTP call
  *   - rpcDeadlineMs:       int, default 30000: the whole on-chain sequence of one verification,
  *                          from its first RPC call; past it the pending anchor checks read "unavailable"
@@ -339,11 +346,14 @@ final class ReceiptVerifier
         $cellLabelBinding = self::assessRecordedCellLabels($companySignature, $notes);
         $disclosureCopy = $this->verifyRecordedDisclosureCopy($r, $notes);
         $documentAnchor = $this->verifyDocumentAnchor($r, $notes);
+        $departure = $this->readIssuerDeparture($r, $companySignature === 'pass' && $receiptIntegrity === 'pass', $notes);
 
         // The issuer is judged FIRST, on its own date: a signed anchor never bounds the instant its own signer chose.
-        $company = $this->rpcUrl() !== ''
-            ? $this->verifyCompanyKeyRegistry($r, ['anchoredAt' => null, 'issuerDatedOnly' => true], $companySignature, $notes)
-            : null;
+        $company = match (true) {
+            $this->rpcUrl() === '' => null,
+            ($departure['reading']['phase'] ?? null) === 'after' => self::companyKeyAfterDeparture($notes),
+            default => $this->verifyCompanyKeyRegistry($r, ['anchoredAt' => null, 'issuerDatedOnly' => true], $companySignature, $notes),
+        };
 
         $consentAnchor = 'skipped';
         $signedAnchor = null;
@@ -362,9 +372,12 @@ final class ReceiptVerifier
             $signedAnchor = $binding;
             $consentAnchor = $this->verifySignedAnchor($r, $binding, $company, $notes);
         }
-        $withdrawal = $this->withdrawalOf($consentAnchor);
+        $withdrawal = $this->withdrawalOf($consentAnchor, self::departureStopsWithdrawal($departure, $company, $consentAnchor, $notes));
 
-        $decisive = [$companySignature, $receiptIntegrity, $disclosureCopy, $documentAnchor, $consentAnchor, $company['status'] ?? null];
+        $decisive = [
+            $companySignature, $receiptIntegrity, $disclosureCopy, $documentAnchor, $consentAnchor, $company['status'] ?? null,
+            $departure['status'] ?? null,
+        ];
         if (in_array('fail', $decisive, true)) {
             $overall = 'failed';
         } elseif ($companySignature === 'unavailable' || $this->registryRefused || ($company !== null && $company['status'] !== 'pass')) {
@@ -398,6 +411,9 @@ final class ReceiptVerifier
             companyKeyRegistry: $company['status'] ?? null,
             companyKey: $company['reading'] ?? null,
             signedAnchor: $signedAnchor,
+            issuerDeparture: $departure['status'] ?? null,
+            departure: $departure['reading'] ?? null,
+            liveDns: $company['dns'] ?? null,
         );
     }
 
@@ -564,6 +580,7 @@ final class ReceiptVerifier
 
         $disclosureCopy = $this->verifyOfferDisclosureCopy($offer, $companySignature, $notes);
         $documentAnchor = $this->verifyDocumentAnchor($r, $notes);
+        $departure = $this->readIssuerDeparture($r, $companySignature === 'pass' && $receiptIntegrity === 'pass', $notes);
 
         // The person's key on chain first: a registry that voids it, or places grantedAt outside its window, leaves the
         // bundle's root untrusted, whatever the DID document says (ui.js receiptRootTrusted).
@@ -585,12 +602,15 @@ final class ReceiptVerifier
             ['cells' => self::acceptedCellCount($r), 'countAnchoredRefs' => true],
             $notes,
         );
-        $withdrawal = $this->withdrawalOf($consentAnchor);
 
         // The company key at grantedAt, bounded by the latest anchor holding the trusted root (issuer.js receiptClockOf).
         $timing = $this->consentTiming;
         $clock = CompanyKey::receiptClockOf($timing !== null ? ['rootMatches' => true, 'anchoredAt' => $timing['latest']] : null);
-        $company = $rpcUrl !== '' ? $this->verifyCompanyKeyRegistry($r, $clock, $companySignature, $notes) : null;
+        $company = match (true) {
+            $rpcUrl === '' => null,
+            ($departure['reading']['phase'] ?? null) === 'after' => self::companyKeyAfterDeparture($notes),
+            default => $this->verifyCompanyKeyRegistry($r, $clock, $companySignature, $notes),
+        };
 
         $citizenKeyChain = null;
         $citizenKey = null;
@@ -629,10 +649,11 @@ final class ReceiptVerifier
             };
             $notes[] = CitizenKeyChain::note($keyChain['state'], $half['colour'], $half['reason'], $withholds);
         }
+        $withdrawal = $this->withdrawalOf($consentAnchor, self::departureStopsWithdrawal($departure, $company, $consentAnchor, $notes));
 
         $checks = [
             $companySignature, $receiptIntegrity, $citizenAssertion, $disclosureCopy, $documentAnchor, $consentAnchor,
-            $citizenKeyChain, $company['status'] ?? null,
+            $citizenKeyChain, $company['status'] ?? null, $departure['status'] ?? null,
         ];
         if (in_array('fail', $checks, true)) {
             $overall = 'failed';
@@ -670,6 +691,9 @@ final class ReceiptVerifier
             companyKey: $company['reading'] ?? null,
             citizenKeyChain: $citizenKeyChain,
             citizenKey: $citizenKey,
+            issuerDeparture: $departure['status'] ?? null,
+            departure: $departure['reading'] ?? null,
+            liveDns: $company['dns'] ?? null,
         );
     }
 
@@ -773,7 +797,75 @@ final class ReceiptVerifier
             $reading['rotated'] = $pit['verdict'] === 'authentic' && strtolower($did['keyId']) !== $keyId;
         }
         $notes[] = CompanyKey::note($reading);
-        return ['status' => CompanyKey::statusOf($pit['verdict']), 'reading' => $reading];
+        $out = ['status' => CompanyKey::statusOf($pit['verdict']), 'reading' => $reading];
+        if ($did !== null && ($this->opts['checkDns'] ?? true) !== false) {
+            $out['dns'] = $this->readLiveDns($domain, $did['keyId'], $notes);
+        }
+        return $out;
+    }
+
+    /**
+     * The issuer's departure (did.js readIssuerDeparture): asked only once the signature held, of an Agreely company DID
+     * whose document, as the resolver returned it, says deactivated, so a live issuer costs no request. A read that fails
+     * is "unavailable", never a reading that the issuer stayed.
+     *
+     * @param array<array-key,mixed> $r
+     * @param list<string> $notes
+     * @return array{status:string, reading:array{state:string, url:string, sealedOn?:string, purgedOn?:string, phase?:string}}|null
+     */
+    private function readIssuerDeparture(array $r, bool $held, array &$notes): ?array
+    {
+        $doc = $this->signer['doc'] ?? null;
+        if (!$held || !is_array($doc) || ($this->opts['checkDeparture'] ?? true) === false || ($doc['deactivated'] ?? null) !== true) {
+            return null;
+        }
+        $issuer = self::asString($r['issuer'] ?? null);
+        $url = IssuerLive::departureUrlOf($issuer);
+        if ($url === null) {
+            return null;
+        }
+        if (($doc['id'] ?? null) !== $issuer) {
+            $notes[] = "issuerDeparture UNAVAILABLE: the issuer's deactivated DID document names another DID, so it establishes no "
+                . "departure of {$issuer}. Nothing changes.";
+            return ['status' => 'unavailable', 'reading' => ['state' => 'unreadable', 'url' => $url]];
+        }
+        $text = $this->fetch($url)['body'];
+        $body = $text !== null ? self::decodeJson($text) : null;
+        if ($body === null) {
+            $notes[] = "issuerDeparture UNAVAILABLE: the issuer's DID document is deactivated, and its departure record ({$url}) could "
+                . 'not be read. This is NOT a reading that the issuer stayed, and nothing changes.';
+            return ['status' => 'unavailable', 'reading' => ['state' => 'unreachable', 'url' => $url]];
+        }
+        $record = IssuerLive::departureRecordOf($body['value'], $issuer);
+        if ($record === null) {
+            $notes[] = "issuerDeparture UNAVAILABLE: the issuer's DID document is deactivated, and its departure record ({$url}) does "
+                . "not establish a departure of {$issuer} (another DID, not purged, or days that are not real dates in order). "
+                . 'Nothing changes.';
+            return ['status' => 'unavailable', 'reading' => ['state' => 'unreadable', 'url' => $url]];
+        }
+        $phase = IssuerLive::departurePhaseOf($record, self::parseInstant(self::signingInstantOf($r)));
+        $reading = ['state' => 'departed', 'url' => $url, 'sealedOn' => $record['sealedOn'], 'purgedOn' => $record['purgedOn'], 'phase' => $phase];
+        $notes[] = IssuerLive::departureNote($reading);
+        return ['status' => match ($phase) { 'after' => 'fail', 'unknown' => 'unavailable', default => 'pass' }, 'reading' => $reading];
+    }
+
+    /**
+     * The company domain's live DNS declaration (issuer.js liveDnsRecheck): one DNS-over-HTTPS read of the TXT record at
+     * _agreely.<domain>, compared with the key the registry names today. A resolver that cannot be read is
+     * "unreachable", never a negative.
+     *
+     * @param list<string> $notes
+     * @return array{status:string, domain:string, keyId:string, resolver:string}
+     */
+    private function readLiveDns(string $domain, string $keyId, array &$notes): array
+    {
+        $resolver = self::asString($this->opts['dohUrl'] ?? null) ?: IssuerLive::DEFAULT_DOH_URL;
+        $text = $this->fetch(IssuerLive::liveDnsQueryUrl($resolver, $domain), IssuerLive::DOH_ACCEPT)['body'];
+        $json = $text !== null ? self::decodeJson($text) : null;
+        $status = $json !== null ? IssuerLive::liveDnsStatusOf($json['value'], $keyId) : 'unreachable';
+        $reading = ['status' => $status, 'domain' => $domain, 'keyId' => $keyId, 'resolver' => $resolver];
+        $notes[] = IssuerLive::liveDnsNote($reading);
+        return $reading;
     }
 
     /**
@@ -1519,7 +1611,7 @@ final class ReceiptVerifier
      *
      * @return array{body:?string, status:?int}
      */
-    private function fetch(string $url): array
+    private function fetch(string $url, string $accept = 'application/json'): array
     {
         $get = $this->opts['httpGet'] ?? null;
         if (is_callable($get)) {
@@ -1530,7 +1622,7 @@ final class ReceiptVerifier
             }
             return ['body' => is_string($out) ? $out : null, 'status' => null];
         }
-        return $this->curl('GET', $url, null);
+        return $this->curl('GET', $url, null, null, $accept);
     }
 
     private function httpPost(string $url, string $body, int $remainingMs): ?string
@@ -1551,13 +1643,13 @@ final class ReceiptVerifier
      * @param 'GET'|'POST' $method
      * @return array{body:?string, status:?int}
      */
-    private function curl(string $method, string $url, ?string $body, ?int $capMs = null): array
+    private function curl(string $method, string $url, ?string $body, ?int $capMs = null, string $accept = 'application/json'): array
     {
         if ($url === '') {
             return ['body' => null, 'status' => null];
         }
         $ch = curl_init();
-        $headers = $body !== null ? ['Accept: application/json', 'Content-Type: application/json'] : ['Accept: application/json'];
+        $headers = $body !== null ? ["Accept: {$accept}", 'Content-Type: application/json'] : ["Accept: {$accept}"];
         $timeoutMs = self::positiveInt($this->opts['timeoutMs'] ?? null, self::DEFAULT_TIMEOUT_MS);
         curl_setopt_array($ch, [
             CURLOPT_URL => $url,
@@ -2409,14 +2501,15 @@ final class ReceiptVerifier
     }
 
     /**
-     * What the consent anchor read says about the consent being in force. Only a complete read says "active".
+     * What the consent anchor read says about the consent being in force. Only a complete read says "active", and not
+     * once its issuer left Agreely ($stopped).
      *
      * @return array{withdrawal:string, withdrawnAt:?int}
      */
-    private function withdrawalOf(string $consentAnchor): array
+    private function withdrawalOf(string $consentAnchor, bool $stopped): array
     {
         if ($consentAnchor === 'pass') {
-            return ['withdrawal' => 'active', 'withdrawnAt' => null];
+            return ['withdrawal' => $stopped ? 'not_checked' : 'active', 'withdrawnAt' => null];
         }
         if ($consentAnchor !== 'withdrawn') {
             return ['withdrawal' => 'not_checked', 'withdrawnAt' => null];
@@ -2428,6 +2521,45 @@ final class ReceiptVerifier
             }
         }
         return ['withdrawal' => 'withdrawn', 'withdrawnAt' => $latest > 0 ? $latest : null];
+    }
+
+    /**
+     * A receipt dated after its issuer's purge: the registry is not asked to vouch for it (ui.js renderIssuerSection).
+     *
+     * @param list<string> $notes
+     * @return array{status:string}
+     */
+    private static function companyKeyAfterDeparture(array &$notes): array
+    {
+        $notes[] = 'companyKeyRegistry skipped: the receipt is dated after its issuer left Agreely, so the registry is not asked to vouch for it.';
+        return ['status' => 'skipped'];
+    }
+
+    /**
+     * An issuer that left inscribes no further withdrawal, so a consent read in force stops reading "active" once the
+     * departure counts (IssuerLive::departureCounts); a withdrawal recorded before it stays a fact (ui.js buildChainCard).
+     *
+     * @param array{status:string, reading:array<string,mixed>}|null $departure
+     * @param array{status:string, reading?:array<string,mixed>, dns?:array<string,string>}|null $company
+     * @param list<string> $notes
+     */
+    private static function departureStopsWithdrawal(?array $departure, ?array $company, string $consentAnchor, array &$notes): bool
+    {
+        if ($departure === null || $departure['reading']['state'] !== 'departed') {
+            return false;
+        }
+        $verdict = $company['reading']['verdict'] ?? null;
+        if (!IssuerLive::departureCounts($departure['reading'], is_string($verdict) ? $verdict : null)) {
+            $notes[] = "Issuer departure NOT COUNTED: the departure record and the deactivated DID document come from the issuer's own "
+                . 'host, so a departure before or during this receipt speaks for the issuer only once companyKeyRegistry '
+                . 'confirms its key (rpcUrl).';
+            return false;
+        }
+        if ($consentAnchor === 'pass') {
+            $notes[] = 'withdrawal not checked: the issuer left Agreely and inscribes no further withdrawal, so the chain can no longer '
+                . 'tell whether this consent is still in force. A withdrawal made directly with the issuer does not appear there.';
+        }
+        return true;
     }
 
     /** Every check "skipped": none ran. receiptType is read from the receipt's own type, a best guess. */

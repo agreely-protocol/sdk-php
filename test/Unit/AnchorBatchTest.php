@@ -50,6 +50,8 @@ final class AnchorBatchTest extends TestCase
             'chainId' => 84532,
             'httpPost' => $chain->post(...),
             'now' => static fn (): int => $now,
+            // No network: the live DNS read of a getCompanyDid answer reads unreachable, which changes no verdict.
+            'httpGet' => static fn (string $url): ?string => null,
         ]);
         /** @var array<string,mixed> $want */
         $want = $c['expect'];

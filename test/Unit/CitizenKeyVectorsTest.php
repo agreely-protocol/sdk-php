@@ -247,6 +247,8 @@ final class CitizenKeyVectorsTest extends TestCase
         $result = Agreely::verifyReceipt($bundle, [
             'resolver' => static fn (string $did): ?array => is_array($docs[$did] ?? null) ? $docs[$did] : null,
             'now' => static fn (): int => $now,
+            // No network: the live DNS read of a getCompanyDid answer reads unreachable, which changes no verdict.
+            'httpGet' => static fn (string $url): ?string => null,
         ] + ($c['rpc'] === true ? ['rpcUrl' => 'https://rpc.test', 'chainId' => 84532, 'httpPost' => $chain->post(...)] : []));
         /** @var array<string,mixed> $want */
         $want = $c['expect'];
